@@ -25,6 +25,8 @@ EMBED_MODEL     = "text-embedding-3-small"
 # Neo4j Community NO soporta índices vectoriales; si estás usando Community, déjalo en False.
 # Si quieres utilizar vector search nativo en Neo4j, usa Neo4j Enterprise / Aura y ponlo en True.
 USE_VECTOR_INDEX = True
+# El reranker se activa automáticamente si instalas `sentence-transformers`.
+# Si no está instalado, el sistema usa un reranking heurístico a nivel artículo.
 
 # ──────────────────────────────────────────────
 # Documento

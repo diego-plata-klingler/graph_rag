@@ -28,6 +28,7 @@ import re
 import sys
 import math
 import argparse
+import unicodedata
 
 from neo4j import GraphDatabase
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
@@ -55,8 +56,97 @@ if sys.platform.startswith("win"):
 # ──────────────────────────────────────────────────────────────────────────────
 MAX_ARTICULOS_CONTEXTO = 12
 MAX_CHARS_CONTEXTO = 15000
-MAX_CHUNKS_RELEVANTES = 18
-MAX_CHUNKS_POR_ARTICULO = 3
+MAX_CHUNKS_RELEVANTES = 10
+MAX_CHUNKS_POR_ARTICULO = 2
+FULLTEXT_CHUNK_CANDIDATES = 30
+FULLTEXT_ARTICULO_CANDIDATES = 12
+RERANK_TOP_ARTICULOS = 6
+NO_CONTEXT_RESPONSE = "NO ENCONTRADO EN EL CONTEXTO"
+
+_STOPWORDS_RERANK = {
+    "a", "al", "algo", "ante", "art", "articulo", "artículo", "bajo", "como", "con",
+    "contra", "cual", "cuál", "cuando", "de", "del", "desde", "donde", "dónde", "el",
+    "en", "entre", "es", "esa", "ese", "esta", "este", "esto", "hay", "la", "las", "le",
+    "ley", "lo", "los", "mas", "más", "me", "mi", "mis", "necesita", "necesitan", "o",
+    "para", "pero", "por", "porque", "puede", "pueden", "que", "qué", "quien", "quién",
+    "regula", "regulan", "se", "segun", "según", "ser", "si", "sí", "sin", "sobre", "su",
+    "sus", "tiene", "tienen", "un", "una", "uno", "unas", "unos", "y", "ya",
+}
+
+_SIGLAS_ARTICULOS = {
+    "SCR": ["art_26"],
+    "FCR": ["art_30"],
+    "SICC": ["art_38"],
+    "FICC": ["art_38"],
+    "SGEIC": ["art_41"],
+    "ECR": ["art_3"],
+    "EICC": ["art_4"],
+    "EICCP": ["art_4_bis"],
+    "ECR-PYME": ["art_20", "art_21", "art_22", "art_23"],
+}
+
+_TERMINOS_ARTICULOS = {
+    "sociedad de capital-riesgo": ["art_26"],
+    "sociedad de capital riesgo": ["art_26"],
+    "fondo de capital-riesgo": ["art_30"],
+    "fondo de capital riesgo": ["art_30"],
+    "sociedad gestora de entidades de inversion colectiva de tipo cerrado": ["art_41"],
+    "sociedad gestora de entidades de inversión colectiva de tipo cerrado": ["art_41"],
+    "entidad de capital-riesgo": ["art_3"],
+    "entidad de capital riesgo": ["art_3"],
+    "entidades de capital-riesgo-pyme": ["art_20", "art_21", "art_22", "art_23"],
+    "entidades de capital riesgo pyme": ["art_20", "art_21", "art_22", "art_23"],
+    "ecr-pyme": ["art_20", "art_21", "art_22", "art_23"],
+    "ecr pyme": ["art_20", "art_21", "art_22", "art_23"],
+    "entidad de inversion colectiva de tipo cerrado": ["art_4"],
+    "entidad de inversión colectiva de tipo cerrado": ["art_4"],
+    "entidad de inversion colectiva de tipo cerrado de prestamos": ["art_4_bis"],
+    "entidad de inversión colectiva de tipo cerrado de préstamos": ["art_4_bis"],
+}
+
+LEGAL_SYNONYMS = {
+    "sgeic": ["sociedad gestora", "sociedades gestoras"],
+    "ecr": ["entidades de capital-riesgo", "capital riesgo"],
+    "ecr pyme": ["ecr-pyme", "capital riesgo pyme"],
+    "ecr-pyme": ["ecr pyme", "capital riesgo pyme"],
+    "eicc": ["entidades de inversión colectiva de tipo cerrado"],
+    "excluye": ["entidades excluidas"],
+    "excluidas": ["entidades excluidas"],
+    "coeficiente": ["porcentaje de inversión", "ratio de inversión"],
+    "comercialización": ["venta", "distribución"],
+    "comercializacion": ["venta", "distribución"],
+}
+
+ARTICLE_TITLE_HINTS = {
+    "excluye": "entidades excluidas",
+    "excluidas": "entidades excluidas",
+    "actividad": "actividad principal",
+    "funciones": "funciones",
+    "definicion": "definición",
+    "definición": "definición",
+    "define": "definición",
+    "significa": "concepto",
+    "que es": "concepto",
+    "qué es": "concepto",
+}
+
+_PATRONES_DEFINICION = (
+    "que es", "que son", "qué es", "qué son", "definicion", "definición",
+    "concepto", "significa", "objeto", "naturaleza", "regimen juridico",
+    "régimen jurídico", "formas juridicas", "formas jurídicas",
+)
+_PATRONES_COMPARATIVA = (
+    "diferencia", "diferencias", "compar", "vs", "versus", "frente a",
+    "relacion entre", "relación entre", "distincion", "distinción",
+)
+_PATRONES_CONDICIONES = (
+    "requisito", "requisitos", "condicion", "condiciones", "autorizacion",
+    "autorización", "acceso", "puede", "pueden", "debe", "deben", "limite",
+    "límite", "prohib", "obligacion", "obligación", "obligaciones",
+)
+
+_RERANKER = None
+_RERANKER_FAILED = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Conexiones
@@ -372,32 +462,15 @@ _QA_PROMPT = ChatPromptTemplate.from_messages([
      "Responde en español basándote SOLO en la información proporcionada. "
 
      "REGLAS:\n"
-
-     # NUEVA REGLA 1
-     "- Antes de responder, identifica qué artículos del contexto contienen la información relevante para la pregunta.\n"
-     "- Si varios artículos regulan distintos aspectos de la respuesta, debes combinarlos en la respuesta final.\n"
-
-     # NUEVA REGLA 2
-     "- Si la pregunta se refiere a tipos de entidades, categorías o clases reguladas por la ley, debes identificar TODAS las categorías definidas en los artículos relevantes.\n"
-
-     "- Si la información proporcionada contiene la respuesta, respóndela de forma clara y cita los artículos.\n"
-     "- Si la pregunta menciona un artículo concreto (por ejemplo, artículo 26 o 4 bis), cita ESE número exacto y, cuando esté en el contexto, incluye su texto completo antes de interpretar.\n"
-
-     "- Cuando el artículo tenga listas con letras (a), b), c)... o listas numeradas, EXTRAE Y CITA TODOS los puntos.\n"
-     "- Debes reproducir TODOS los elementos de la lista exactamente como aparecen en el texto.\n"
-     "- No omitas ninguno.\n"
-     "- No añadas elementos nuevos.\n"
-
-     "- El usuario puede usar términos genéricos; búscalos en el texto aunque no coincidan exactamente. "
-     "'procedimientos' puede referirse a 'procedimiento de gestión del riesgo de crédito', etc.\n"
-
-     "- CRÍTICO — NUNCA inventes números de artículo: solo cita los que aparezcan en la información.\n"
-     "- Antes de responder, valida que cada artículo citado exista en la información recuperada.\n"
-
-     "- Si la información no es suficiente, di exactamente: "
-     "'La Ley 22/2014 no regula expresamente este aspecto en los artículos consultados.'\n"
-
-     "- NUNCA digas 'no encontrado en el documento', 'no tengo información' ni frases que suenen a error técnico."
+     "- Usa exclusivamente el contexto. No completes lagunas con conocimiento externo, intuiciones ni interpretaciones.\n"
+     "- Si el contexto no contiene la respuesta suficiente, responde exactamente: "
+     f"'{NO_CONTEXT_RESPONSE}'.\n"
+     "- Identifica primero qué artículos del contexto soportan la respuesta.\n"
+     "- Si varios artículos regulan distintos aspectos, combínalos solo si todos están en el contexto.\n"
+     "- Si la pregunta menciona un artículo concreto, cita ese número exacto.\n"
+     "- Si el contexto contiene listas legales, reproduce todos sus elementos relevantes y no añadas ninguno.\n"
+     "- NUNCA inventes números de artículo ni categorías jurídicas.\n"
+     "- La respuesta debe ser breve: artículos relevantes y explicación corta."
     ),
     ("human", "Información recuperada:\n{context}\n\nPregunta: {question}")
 ])
@@ -417,13 +490,333 @@ def _extraer_numeros_articulo(texto: str) -> list[str]:
 
 def _extraer_entidades_query(query: str) -> list[str]:
     """Detecta entidades jurídicas en la query."""
-    conocidas = ["SGEIC", "ECR", "SICC", "FICC", "CNMV", "GFIA", "AIFMD"]
+    conocidas = ["SGEIC", "ECR", "SCR", "FCR", "SICC", "FICC", "EICC", "EICCP", "CNMV", "GFIA", "AIFMD"]
     return [e for e in conocidas if e.lower() in query.lower()]
 
 
 def _articulo_id(numero_normalizado: str) -> str:
     return f"art_{numero_normalizado}"
 
+
+def _strip_accents(texto: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", texto or "")
+        if not unicodedata.combining(ch)
+    )
+
+
+def _normalizar_texto(texto: str) -> str:
+    normalizado = _strip_accents(texto).lower()
+    return re.sub(r"\s+", " ", normalizado).strip()
+
+
+def _tokenizar(texto: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", _normalizar_texto(texto))
+    return [tok for tok in tokens if len(tok) > 1 and tok not in _STOPWORDS_RERANK]
+
+
+def _dedupe_preservando_orden(items: list[str]) -> list[str]:
+    vistos = set()
+    salida = []
+    for item in items:
+        if not item or item in vistos:
+            continue
+        vistos.add(item)
+        salida.append(item)
+    return salida
+
+
+def expand_query_with_synonyms(query: str) -> str:
+    query_lower = (query or "").lower()
+    extras = []
+    for key, synonyms in LEGAL_SYNONYMS.items():
+        if key in query_lower:
+            for synonym in synonyms:
+                synonym_lower = synonym.lower()
+                if synonym_lower not in query_lower and synonym_lower not in extras:
+                    extras.append(synonym_lower)
+    if not extras:
+        return query
+    return f"{query} {' '.join(extras)}".strip()
+
+
+def expand_query_with_article_titles(query: str) -> str:
+    query_lower = (query or "").lower()
+    extras = []
+    for key, article_title in ARTICLE_TITLE_HINTS.items():
+        title_lower = article_title.lower()
+        if key in query_lower and title_lower not in query_lower and title_lower not in extras:
+            extras.append(title_lower)
+    if not extras:
+        return query
+    return f"{query} {' '.join(extras)}".strip()
+
+
+def expand_query(query: str) -> str:
+    expanded_query = expand_query_with_synonyms(query)
+    return expand_query_with_article_titles(expanded_query)
+
+
+def _extraer_siglas_query(query: str) -> list[str]:
+    siglas = re.findall(r"\b[A-Z]{2,}(?:-[A-Z]+)?\b", query or "")
+    return _dedupe_preservando_orden(siglas)
+
+
+def _clasificar_pregunta(query: str) -> str:
+    query_norm = _normalizar_texto(query)
+    if _extraer_numeros_articulo(query):
+        return "articulo_directo"
+    if any(patron in query_norm for patron in _PATRONES_COMPARATIVA):
+        return "comparativa"
+    if any(patron in query_norm for patron in _PATRONES_CONDICIONES):
+        return "condiciones"
+    if any(patron in query_norm for patron in _PATRONES_DEFINICION) or _extraer_siglas_query(query):
+        return "definicion"
+    return "general"
+
+
+def _semillas_articulos_query(query: str) -> list[str]:
+    query_norm = _normalizar_texto(query)
+    semillas = []
+
+    for sigla in _extraer_siglas_query(query):
+        if sigla in _SIGLAS_ARTICULOS:
+            semillas.extend(_SIGLAS_ARTICULOS[sigla])
+
+    for termino, ids in sorted(_TERMINOS_ARTICULOS.items(), key=lambda item: len(item[0]), reverse=True):
+        if _normalizar_texto(termino) in query_norm:
+            semillas.extend(ids)
+
+    return _dedupe_preservando_orden(semillas)
+
+
+def _terminos_busqueda(query: str) -> list[str]:
+    tokens = _tokenizar(query)
+    siglas = _extraer_siglas_query(query)
+    terminos = list(siglas)
+    terminos.extend(tokens)
+    return _dedupe_preservando_orden(terminos)
+
+
+def _numero_base_articulo(articulo: dict) -> int:
+    numero = str(articulo.get("numero", ""))
+    match = re.match(r"(\d+)", numero)
+    return int(match.group(1)) if match else 10**9
+
+
+def _texto_rerank_articulo(articulo: dict) -> str:
+    partes = [f"Artículo {articulo.get('numero', '?')}. {articulo.get('titulo', '')}"]
+    for chunk in _merge_chunks(articulo.get("chunks_relevantes", []))[:4]:
+        texto = chunk.get("texto", "")
+        if texto:
+            partes.append(texto)
+    if len(partes) == 1 and articulo.get("texto"):
+        partes.append(str(articulo.get("texto", ""))[:3000])
+    return "\n".join(partes)
+
+
+def _score_texto_para_query(query: str, texto: str) -> float:
+    q_tokens = _tokenizar(query)
+    if not q_tokens:
+        return 0.0
+
+    texto_norm = _normalizar_texto(texto)
+    tokens_texto = set(_tokenizar(texto))
+
+    score = 0.0
+    for token in q_tokens:
+        if token in tokens_texto:
+            score += 1.5
+        if len(token) >= 4 and token in texto_norm:
+            score += 0.6
+
+    for sigla in _extraer_siglas_query(query):
+        if sigla.lower() in texto_norm:
+            score += 4.0
+
+    frases = [
+        frase.strip()
+        for frase in re.split(r"[?!.:,;]+", query)
+        if len(frase.strip().split()) >= 2
+    ]
+    for frase in frases:
+        frase_norm = _normalizar_texto(frase)
+        if len(frase_norm) >= 10 and frase_norm in texto_norm:
+            score += 3.0
+
+    return score
+
+
+def _score_estructura_articulo(articulo: dict, tipo_pregunta: str) -> float:
+    titulo_norm = _normalizar_texto(articulo.get("titulo", ""))
+    base_num = _numero_base_articulo(articulo)
+    score = 0.0
+
+    if tipo_pregunta in {"definicion", "comparativa"}:
+        if any(
+            patron in titulo_norm
+            for patron in ("definicion", "regimen juridico", "concepto", "objeto")
+        ):
+            score += 3.0
+        if base_num <= 45:
+            score += 1.0
+
+    if tipo_pregunta == "condiciones":
+        if any(
+            patron in titulo_norm
+            for patron in ("requisito", "condicion", "autorizacion", "acceso", "obligacion")
+        ):
+            score += 3.0
+
+    return score
+
+
+def _get_reranker(verbose: bool = False):
+    global _RERANKER, _RERANKER_FAILED
+    if _RERANKER is not None or _RERANKER_FAILED:
+        return _RERANKER
+    try:
+        from sentence_transformers import CrossEncoder
+        _RERANKER = CrossEncoder("BAAI/bge-reranker-v2-m3")
+    except Exception as exc:
+        _RERANKER_FAILED = True
+        if verbose:
+            print(f"[rerank] Reranker no disponible; uso heurístico. Detalle: {exc}")
+    return _RERANKER
+
+
+def _rerank_articulos(
+    query: str,
+    articulos: list[dict],
+    tipo_pregunta: str,
+    ids_prioritarios: list[str] | None = None,
+    ids_semilla: list[str] | None = None,
+    verbose: bool = False,
+) -> list[dict]:
+    ids_prioritarios = ids_prioritarios or []
+    ids_semilla = ids_semilla or []
+    prioridad = {art_id: i for i, art_id in enumerate(ids_prioritarios)}
+    semillas = {art_id: i for i, art_id in enumerate(ids_semilla)}
+
+    if not articulos:
+        return []
+
+    enriquecidos = []
+    for articulo in articulos:
+        art = dict(articulo)
+        texto_rerank = _texto_rerank_articulo(art)
+        base_score = float(art.get("score") or 0.0)
+        heuristico = _score_texto_para_query(query, texto_rerank) + _score_estructura_articulo(art, tipo_pregunta)
+        art["rerank_score"] = heuristico + (base_score * 4.0)
+        art["_texto_rerank"] = texto_rerank
+        enriquecidos.append(art)
+
+    reranker = _get_reranker(verbose=verbose)
+    if reranker is not None:
+        pares = [(query, art["_texto_rerank"][:3500]) for art in enriquecidos]
+        try:
+            scores = reranker.predict(pares)
+            for art, score in zip(enriquecidos, scores):
+                art["rerank_score"] += float(score) * 5.0
+        except Exception as exc:
+            if verbose:
+                print(f"[rerank] Falló el reranker; sigo con heurístico. Detalle: {exc}")
+
+    def _key(art: dict):
+        art_id = art.get("id", "")
+        if art_id in prioridad:
+            return (0, prioridad[art_id], 0.0, _numero_base_articulo(art), art_id)
+        if art_id in semillas:
+            return (1, semillas[art_id], -float(art.get("rerank_score") or 0.0), _numero_base_articulo(art), art_id)
+        return (2, -float(art.get("rerank_score") or 0.0), _numero_base_articulo(art), art_id)
+
+    ordenados = sorted(enriquecidos, key=_key)
+    for art in ordenados:
+        art.pop("_texto_rerank", None)
+    return ordenados
+
+
+def _seleccionar_chunks_relevantes(query: str, chunks: list[dict], limit: int = MAX_CHUNKS_POR_ARTICULO) -> list[dict]:
+    if not chunks:
+        return []
+    if not query:
+        return _merge_chunks(chunks)[:limit]
+
+    candidatos = []
+    for chunk in _merge_chunks(chunks):
+        chunk_copy = dict(chunk)
+        score = _score_texto_para_query(query, chunk_copy.get("texto", "")) + _score_chunk(chunk_copy)
+        chunk_copy["query_score"] = score
+        candidatos.append(chunk_copy)
+
+    candidatos.sort(key=lambda c: (-float(c.get("query_score") or 0.0), c.get("orden", 10**9), c.get("id", "")))
+    for chunk in candidatos:
+        chunk.pop("query_score", None)
+    return candidatos[:limit]
+
+
+def _es_respuesta_no_contexto(respuesta: str) -> bool:
+    texto = _normalizar_texto(respuesta)
+    if not texto:
+        return True
+    marcadores = (
+        _normalizar_texto(NO_CONTEXT_RESPONSE),
+        "no regula expresamente",
+        "no tengo informacion",
+        "no encontr",
+        "no hay informacion",
+    )
+    return any(marcador in texto for marcador in marcadores)
+
+
+def _verificar_groundedness(llm, query: str, contexto: str, respuesta: str) -> bool:
+    if not contexto or _es_respuesta_no_contexto(respuesta):
+        return False
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    verdict = llm.invoke([
+        SystemMessage(content=(
+            "Verifica si la respuesta propuesta está completamente soportada por el contexto. "
+            "Responde solo YES o NO. "
+            "Responde NO si hay inferencias no explícitas, generalizaciones, ejemplos inventados o "
+            "cualquier dato que no esté claramente contenido en el contexto."
+        )),
+        HumanMessage(content=(
+            f"Pregunta:\n{query}\n\n"
+            f"Contexto:\n{contexto}\n\n"
+            f"Respuesta propuesta:\n{respuesta}"
+        )),
+    ]).content.strip().upper()
+    return verdict.startswith("YES")
+
+
+def _articulos_completos_para_query(
+    query: str,
+    articulos: list[dict],
+    ids_objetivo: list[str] | None = None,
+    numeros_objetivo: list[str] | None = None,
+    ids_semilla: list[str] | None = None,
+) -> set[str]:
+    ids_objetivo = ids_objetivo or []
+    numeros_objetivo = numeros_objetivo or []
+    ids_semilla = ids_semilla or []
+    tipo_pregunta = _clasificar_pregunta(query)
+
+    completos = set(ids_objetivo) | set(numeros_objetivo)
+    if tipo_pregunta == "articulo_directo":
+        completos.update(ids_objetivo)
+        return completos
+
+    top_n = 2
+    if tipo_pregunta in {"definicion", "comparativa"}:
+        top_n = 3
+    elif tipo_pregunta == "condiciones":
+        top_n = 2
+
+    completos.update(ids_semilla[:top_n])
+    completos.update(a.get("id") for a in articulos[:top_n] if a.get("id"))
+    return completos
 
 def _score_chunk(chunk: dict) -> float:
     try:
@@ -674,11 +1067,15 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
     """
     Recupera artículos relevantes desde Neo4j usando chunks como unidad primaria:
       1. Números de artículo directos en la query
-      2. Entidades mencionadas en la query
-      3. Búsqueda FULLTEXT por palabras clave sobre Chunk
-      4. Expansión: referencias + misma sección + mismo capítulo
+      2. Semillas jurídicas por siglas y definiciones legales
+      3. Entidades mencionadas en la query
+      4. Búsqueda FULLTEXT por palabras clave sobre Chunk y Articulo
+      5. Expansión: referencias + misma sección + mismo capítulo
+      6. Reranking final a nivel artículo
     """
     resultados: dict[str, dict] = {}
+    retrieval_query = expand_query(query)
+    tipo_pregunta = _clasificar_pregunta(query)
 
     def _guardar_articulo(art: dict | None):
         if not art or not art.get("id"):
@@ -691,18 +1088,25 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
 
     numeros_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in numeros_objetivo]
+    ids_semilla = _semillas_articulos_query(retrieval_query)
     entity_ids: set[str] = set()
+    terminos_busqueda = _terminos_busqueda(retrieval_query)
 
     with driver.session() as s:
+        if verbose and retrieval_query != query:
+            print(f"  [expansion] Query expandida: {retrieval_query}")
         if numeros_objetivo and verbose:
             print(f"  [1] Artículos directos solicitados: {ids_objetivo}")
-        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo))
+        direct_ids = _dedupe_preservando_orden(ids_objetivo + ids_semilla)
+        if ids_semilla and verbose:
+            print(f"  [2] Semillas jurídicas: {ids_semilla}")
+        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, direct_ids))
         for art in directos:
             _guardar_articulo(art)
 
-        entidades = _extraer_entidades_query(query)
+        entidades = _extraer_entidades_query(retrieval_query)
         if entidades and verbose:
-            print(f"  [2] Entidades: {entidades}")
+            print(f"  [3] Entidades: {entidades}")
         for ent in entidades:
             res = s.run("""
                 MATCH (a:Articulo)-[:MENCIONA]->(e:Entidad {nombre: $nombre})
@@ -712,11 +1116,10 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
                 if record.get("articulo_id"):
                     entity_ids.add(record["articulo_id"])
 
-        palabras = [p for p in re.split(r'\W+', query) if len(p) > 4]
-        if palabras:
-            lucene_query = " OR ".join(palabras[:6])
+        if terminos_busqueda:
+            lucene_query = " OR ".join(terminos_busqueda[:8])
             if verbose:
-                print(f"  [3] Fulltext sobre chunks: {lucene_query}")
+                print(f"  [4] Fulltext sobre chunks: {lucene_query}")
             try:
                 res = s.run("""
                     CALL db.index.fulltext.queryNodes('chunk_texto', $q)
@@ -725,21 +1128,47 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
                     WHERE score > 0.2
                     RETURN a, node AS c, score
                     ORDER BY score DESC, c.orden ASC
-                    LIMIT 20
-                """, q=lucene_query)
+                    LIMIT $limit
+                """, q=lucene_query, limit=FULLTEXT_CHUNK_CANDIDATES)
                 for record in res:
                     _guardar_articulo(_row_to_articulo_con_chunk(record))
             except Exception:
-                for p in palabras[:5]:
+                for p in terminos_busqueda[:6]:
                     res = s.run("""
                         MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
                         WHERE toLower(c.texto) CONTAINS toLower($p)
                         RETURN a, c, 0.0 AS score
                         ORDER BY c.orden ASC
-                        LIMIT 10
+                        LIMIT 8
                     """, p=p)
                     for record in res:
                         _guardar_articulo(_row_to_articulo_con_chunk(record))
+
+            try:
+                res = s.run("""
+                    CALL db.index.fulltext.queryNodes('articulo_texto', $q)
+                    YIELD node, score
+                    RETURN node AS a, score
+                    ORDER BY score DESC
+                    LIMIT $limit
+                """, q=lucene_query, limit=FULLTEXT_ARTICULO_CANDIDATES)
+                for record in res:
+                    _guardar_articulo(_row_to_articulo_con_chunk(record))
+            except Exception:
+                pass
+
+        if tipo_pregunta in {"definicion", "comparativa"}:
+            for kw in ["Definición", "Régimen jurídico", "Concepto", "Objeto"]:
+                res = s.run(
+                    """
+                    MATCH (a:Articulo)
+                    WHERE a.titulo CONTAINS $kw
+                    RETURN a LIMIT 8
+                    """,
+                    kw=kw,
+                )
+                for record in res:
+                    _guardar_articulo(_row_to_articulo_con_chunk(record))
 
         if entity_ids:
             entity_articles = _adjuntar_chunks_articulos(
@@ -767,14 +1196,22 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
                 resultados[art_id] = art
                 nuevos += 1
         if verbose and nuevos > 0:
-            print(f"  [4] Expandidos (referencias/seccion/capitulo): +{nuevos} artículos")
+            print(f"  [5] Expandidos (referencias/seccion/capitulo): +{nuevos} artículos")
 
-    ordenados = _ordenar_articulos(list(resultados.values()), ids_prioritarios=ids_objetivo)
-    return ordenados[:MAX_ARTICULOS_CONTEXTO]
+    reordenados = _rerank_articulos(
+        query,
+        list(resultados.values()),
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=verbose,
+    )
+    return reordenados[:MAX_ARTICULOS_CONTEXTO]
 
 
 def construir_contexto(
     articulos: list[dict],
+    query: str | None = None,
     max_chars: int = MAX_CHARS_CONTEXTO,
     articulos_completos: set[str] | None = None,
     ids_prioritarios: list[str] | None = None,
@@ -792,7 +1229,7 @@ def construir_contexto(
         if incluir_completo:
             cuerpo = art.get("texto", "")
         else:
-            fragmentos = _merge_chunks(art.get("chunks_relevantes", []))[:MAX_CHUNKS_POR_ARTICULO]
+            fragmentos = _seleccionar_chunks_relevantes(query or "", art.get("chunks_relevantes", []))
             if fragmentos:
                 lineas = []
                 for idx, chunk in enumerate(fragmentos, 1):
@@ -830,27 +1267,28 @@ def _sintetizar_respuesta(
         lista = ", ".join(f"artículo {n.replace('_', ' ')}" for n in articulos_objetivo)
         instruccion_objetivo = (
             f" El usuario pide explícitamente {lista}. "
-            "Debes mencionar esos números exactos y, cuando el contexto incluya su contenido íntegro, "
-            "citar el texto completo antes de interpretar."
+            "Debes mencionar esos números exactos y responder solo con lo que esté soportado por esos artículos."
         )
 
     messages = [
         SystemMessage(content=(
             "Eres un asistente jurídico experto en la Ley 22/2014 de entidades de capital-riesgo. "
             "Responde en español basándote SOLO en el contexto proporcionado. "
-            "El usuario puede usar términos coloquiales o genéricos; interpreta la intención y usa la información equivalente del contexto. "
-            "Cuando el contexto tenga listas con (a), b), c)...) o números, EXTRAE Y CITA TODOS los puntos: son obligaciones o requisitos legales que debes incluir en la respuesta. "
-            "CRÍTICO: solo cita artículos que aparezcan en el texto. "
-            "Valida internamente que cada artículo mencionado en tu salida exista en el contexto. "
-            "Si realmente no hay información relacionada, responde: "
-            "'La Ley 22/2014 no regula expresamente este aspecto en los artículos consultados.' "
-            "No digas 'no encontrado en el documento' ni frases que suenen a error técnico."
+            "No uses conocimiento externo, no extrapoles y no completes huecos. "
+            "Si el contexto no contiene la respuesta suficiente, responde exactamente: "
+            f"'{NO_CONTEXT_RESPONSE}'. "
+            "Cita solo artículos que aparezcan en el contexto. "
+            "Si el contexto incluye listas legales, reproduce todos los elementos relevantes sin añadir otros. "
+            "Responde de forma breve: primero los artículos relevantes y después una explicación corta, sin doctrinas ni ejemplos inventados."
             f"{instruccion_objetivo}"
         )),
         HumanMessage(content=(
             f"Contexto de la ley:\n{contexto}\n\n"
             f"Pregunta del usuario: {query}\n"
-            "Menciona siempre el número de artículo en la respuesta."
+            "Formato esperado:\n"
+            "Artículos relevantes: ...\n"
+            "Respuesta: ...\n"
+            f"Si no está soportado, responde solo: {NO_CONTEXT_RESPONSE}"
         )),
     ]
     return llm.invoke(messages).content
@@ -899,11 +1337,12 @@ def _validar_y_reforzar_citas(
 
     reforzados = _merge_articulos(base_contexto, directos, fetched, expandidos)
     if not reforzados:
-        return "La Ley 22/2014 no regula expresamente este aspecto en los artículos consultados."
+        return NO_CONTEXT_RESPONSE
 
     articulos_completos = set(faltan) | ids_faltan
     contexto_reforzado = construir_contexto(
         reforzados,
+        query=query,
         articulos_completos=articulos_completos,
         ids_prioritarios=ids_objetivo,
     )
@@ -919,9 +1358,41 @@ def _validar_y_reforzar_citas(
     if faltan_despues:
         if verbose or trace:
             print(f"[validacion citas] sigue faltando citar artículos: {faltan_despues}.")
-        return "La Ley 22/2014 no regula expresamente este aspecto en los artículos consultados."
+        return NO_CONTEXT_RESPONSE
 
     return respuesta_reforzada
+
+
+def _filtrar_respuesta_por_groundedness(
+    query: str,
+    respuesta: str,
+    contexto: str,
+    log_llm: bool = False,
+    verbose: bool = False,
+    trace: bool = False,
+) -> str:
+    if _es_respuesta_no_contexto(respuesta):
+        return NO_CONTEXT_RESPONSE
+    if not contexto.strip():
+        return NO_CONTEXT_RESPONSE
+
+    try:
+        soportada = _verificar_groundedness(
+            get_llm(log_llm=log_llm),
+            query=query,
+            contexto=contexto,
+            respuesta=respuesta,
+        )
+    except Exception as exc:
+        if verbose or trace:
+            print(f"[groundedness] No se pudo verificar; mantengo respuesta. Detalle: {exc}")
+        return respuesta
+
+    if not soportada:
+        if verbose or trace:
+            print("[groundedness] Respuesta no soportada por el contexto. Se devuelve fallback estricto.")
+        return NO_CONTEXT_RESPONSE
+    return respuesta
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -929,187 +1400,33 @@ def _validar_y_reforzar_citas(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _fallback_texto(query: str) -> str:
-    """Busca artículos por coincidencia de palabras clave en su texto."""
-    SINONIMOS = {
-        "presupuesto": "patrimonio",
-        "presupuesto minimo": "patrimonio comprometido",
-        "capital minimo": "patrimonio comprometido",
-        "capital inicial": "patrimonio comprometido",
-        "inversion minima": "patrimonio comprometido",
-        "dinero minimo": "patrimonio comprometido",
-        "importe minimo": "patrimonio comprometido",
-        "cuota minima": "patrimonio comprometido",
-        "aportacion minima": "patrimonio comprometido",
-        "administrador": "gestor",
-        "director": "gestor",
-        "multa": "sancion",
-        "penalizacion": "sancion",
-        "socio": "participe",
-        "accionista": "participe",
-        "inversor": "participe",
-    }
-
-    PALABRAS_DEFINICION = {"qué es", "que es", "qué son", "que son", "definicion",
-                           "definición", "naturaleza", "objeto", "formas jurídicas",
-                           "formas juridicas", "diferencia entre", "diferencia",
-                           "concepto", "caracterizan", "constituyen", "cuál es"}
-    es_pregunta_definitoria = any(expr in query.lower() for expr in PALABRAS_DEFINICION)
-
-    stopwords = {"cual", "cuál", "como", "cómo", "qué", "que", "para", "sobre",
-                 "tiene", "debe", "deben", "puede", "pueden", "artículo",
-                 "articulo", "ley", "regulan", "regula", "dice", "indica", "fondo"}
-
-    query_norm = query.lower().strip("?¿.,:")
-    for sinonimo, legal in SINONIMOS.items():
-        if sinonimo in query_norm:
-            query_norm = query_norm.replace(sinonimo, legal)
-
-    palabras = [w.strip("?¿.,:") for w in query_norm.split()
-                if (len(w) > 4 or w.strip("?¿.,:").isupper()) and w.strip("?¿.,:") not in stopwords]
-    acronimos = [w.strip("?¿.,:;") for w in query.split()
-                 if w.strip("?¿.,:;").isupper() and len(w.strip("?¿.,:;")) >= 2]
-    if not palabras and not acronimos:
-        return ""
-
-    ACRONIMOS_LEY = {
-        "SCR":   "Sociedad de Capital-Riesgo (artículo 26)",
-        "FCR":   "Fondo de Capital-Riesgo (artículo 30)",
-        "SICC":  "Sociedad de Inversión Colectiva de Tipo Cerrado (artículo 38)",
-        "FICC":  "Fondo de Inversión Colectiva de Tipo Cerrado (artículo 38)",
-        "SGEIC": "Sociedad Gestora de Entidades de Inversión Colectiva de Tipo Cerrado (artículo 41)",
-        "ECR":   "Entidad de Capital-Riesgo (artículo 3)",
-        "EICC":  "Entidad de Inversión Colectiva de Tipo Cerrado (artículo 4)",
-        "EICCP": "Entidad de Inversión Colectiva de Tipo Cerrado de Préstamos (artículo 4 bis)",
-        "CNMV":  "Comisión Nacional del Mercado de Valores",
-    }
-    acr_encontrados = [acr for acr in acronimos if acr in ACRONIMOS_LEY]
-    contexto_acronimos = ""
-    if acr_encontrados:
-        lineas = [f"- {acr}: {ACRONIMOS_LEY[acr]}" for acr in acr_encontrados]
-        contexto_acronimos = "Expansión de siglas según la Ley 22/2014:\n" + "\n".join(lineas) + "\n\n"
-
-    numeros_objetivo = _extraer_numeros_articulo(query)
-    ids_objetivo = [_articulo_id(n) for n in numeros_objetivo]
-
+    """Busca contexto con el mismo retrieval jurídico del modo grafo."""
+    retrieval_query = expand_query(query)
     driver = get_driver()
-    resultados: dict[str, dict] = {}
-
-    def _guardar_articulo(art: dict | None):
-        if not art or not art.get("id"):
-            return
-        previo = resultados.get(art["id"])
-        if previo is None:
-            resultados[art["id"]] = art
-        else:
-            resultados[art["id"]] = _merge_articulos([previo], [art])[0]
-
     try:
-        with driver.session() as s:
-            if ids_objetivo:
-                directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo))
-                for art in directos:
-                    _guardar_articulo(art)
-
-            if es_pregunta_definitoria:
-                titulos_def = [
-                    "Objeto", "Naturaleza", "Formas", "Definición", "Concepto",
-                    "Régimen jurídico", "Inversión colectiva", "Entidades de inversión",
-                    "Ámbito de aplicación",
-                ]
-                for titulo_kw in titulos_def:
-                    rows = s.run(
-                        "MATCH (a:Articulo) WHERE a.titulo CONTAINS $kw "
-                        "RETURN a ORDER BY a.numero LIMIT 6",
-                        kw=titulo_kw,
-                    )
-                    for r in rows:
-                        _guardar_articulo(dict(r["a"]))
-
-                for palabra in palabras[:4]:
-                    rows = s.run(
-                        "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
-                        "WHERE toLower(c.texto) CONTAINS toLower($kw) "
-                        "AND toInteger(split(a.numero, ' ')[0]) <= 15 "
-                        "RETURN a, c, 0.0 AS score ORDER BY a.numero, c.orden LIMIT 6",
-                        kw=palabra,
-                    )
-                    for r in rows:
-                        _guardar_articulo(_row_to_articulo_con_chunk(r))
-
-            for acr in acronimos[:6]:
-                rows = s.run(
-                    "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
-                    "WHERE a.titulo CONTAINS $kw OR c.texto CONTAINS $kw "
-                    "RETURN a, c, 0.0 AS score ORDER BY a.numero, c.orden LIMIT 6",
-                    kw=acr,
-                )
-                for r in rows:
-                    _guardar_articulo(_row_to_articulo_con_chunk(r))
-
-            for palabra in palabras[:5]:
-                rows = s.run(
-                    "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
-                    "WHERE toLower(c.texto) CONTAINS toLower($kw) "
-                    "RETURN a, c, 0.0 AS score LIMIT 6",
-                    kw=palabra,
-                )
-                for r in rows:
-                    _guardar_articulo(_row_to_articulo_con_chunk(r))
-
-            pide_cantidad = any(
-                w in query.lower()
-                for w in ["minimo", "mínimo", "cuanto", "cuánto", "importe", "cifra", "cantidad", "euros", "presupuesto"]
-            )
-            if pide_cantidad:
-                for palabra in palabras[:4]:
-                    rows = s.run(
-                        "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
-                        "WHERE toLower(c.texto) CONTAINS toLower($kw) "
-                        "AND c.texto CONTAINS 'euros' "
-                        "RETURN a, c, 0.0 AS score LIMIT 6",
-                        kw=palabra,
-                    )
-                    for r in rows:
-                        _guardar_articulo(_row_to_articulo_con_chunk(r))
-
-        ids_semilla = list(resultados.keys()) or ids_objetivo
-        if ids_semilla:
-            expandidos = _adjuntar_chunks_articulos(
-                driver,
-                _expandir_subgrafo(driver, ids_semilla, verbose=False),
-                limit_per_article=1,
-            )
-            for art in expandidos:
-                _guardar_articulo(art)
+        articulos = buscar_articulos(driver, query, verbose=False)
     finally:
         driver.close()
 
-    if resultados:
-        articulos_base = list(resultados.values())
-        driver_extra = get_driver()
-        try:
-            articulos = _adjuntar_chunks_articulos(
-                driver=driver_extra,
-                articulos=articulos_base,
-                limit_per_article=MAX_CHUNKS_POR_ARTICULO,
-            )
-        finally:
-            driver_extra.close()
-    else:
-        articulos = []
-
-    articulos = _ordenar_articulos(articulos, ids_prioritarios=ids_objetivo)[:MAX_ARTICULOS_CONTEXTO]
-    if not articulos and not contexto_acronimos:
+    if not articulos:
         return ""
 
-    contexto_articulos = construir_contexto(
+    numeros_objetivo = _extraer_numeros_articulo(query)
+    ids_objetivo = [_articulo_id(n) for n in numeros_objetivo]
+    ids_semilla = _semillas_articulos_query(retrieval_query)
+    articulos_completos = _articulos_completos_para_query(
+        query,
         articulos,
-        articulos_completos=set(ids_objetivo) | set(numeros_objetivo),
+        ids_objetivo=ids_objetivo,
+        numeros_objetivo=numeros_objetivo,
+        ids_semilla=ids_semilla,
+    )
+    return construir_contexto(
+        articulos,
+        query=query,
+        articulos_completos=articulos_completos,
         ids_prioritarios=ids_objetivo,
     )
-    if contexto_acronimos and contexto_articulos:
-        return f"{contexto_acronimos}{contexto_articulos}"
-    return contexto_acronimos or contexto_articulos
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1118,9 +1435,11 @@ def _fallback_texto(query: str) -> str:
 
 def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
     """Usa GraphCypherQAChain: pregunta -> Cypher -> Neo4j -> respuesta."""
+    retrieval_query = expand_query(query)
     articulos_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
     articulos_directos = _recuperar_articulos_objetivo(query, expandir=True, verbose=verbose or trace)
+    ids_semilla = _semillas_articulos_query(query)
 
     llm = get_llm(log_llm=log_llm)
     graph = get_lang_graph()
@@ -1158,8 +1477,11 @@ def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_
         expansiones = "; ".join(f"{s} = {_SIGLAS_LEY[s]}" for s in siglas_en_query)
         nota_siglas = f"\n[Referencia obligatoria — expansiones exactas de la Ley 22/2014: {expansiones}]"
 
+    if (verbose or trace) and retrieval_query != query:
+        print(f"[expansion] Query expandida para generación de Cypher: {retrieval_query}")
+
     result = chain.invoke({
-        "query": f"Responde en español. Ley 22/2014 (BOE).{nota_siglas}\nPregunta: {query}"
+        "query": f"Responde en español. Ley 22/2014 (BOE).{nota_siglas}\nPregunta: {retrieval_query}"
     })
 
     # Extraer steps siempre (se usan tanto para trace como para resintetizar)
@@ -1188,86 +1510,63 @@ def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_
             print("   (ninguno — la consulta no devolvio resultados)")
         print("=" * 60 + "\n")
 
-    respuesta = result.get("result", str(result))
     contexto_directo = ""
     if articulos_directos:
+        articulos_completos = _articulos_completos_para_query(
+            query,
+            articulos_directos,
+            ids_objetivo=ids_objetivo,
+            numeros_objetivo=articulos_objetivo,
+            ids_semilla=ids_semilla,
+        )
         contexto_directo = construir_contexto(
             articulos_directos,
-            articulos_completos=set(articulos_objetivo) | set(ids_objetivo),
+            query=query,
+            articulos_completos=articulos_completos,
             ids_prioritarios=ids_objetivo,
         )
         if verbose or trace:
             print(f"[articulo directo] Contexto anadido: {len(articulos_directos)} articulos")
 
-    # -- Si el Cypher devolvió datos pero la chain respondió "no regula",
-    #    sintetizar directamente desde el contexto de Neo4j (más fiable que la QA interna)
-    respuesta_lower = respuesta.lower()
-    no_encontro = (
-        not respuesta
-        or "no s" in respuesta_lower
-        or "no tengo" in respuesta_lower
-        or "no encontr" in respuesta_lower
-        or "no hay inform" in respuesta_lower
-        or "no regula expresamente" in respuesta_lower
-    )
-
-    if no_encontro and cypher_rows:
-        contexto_cypher = "\n\n---\n\n".join(
-            "\n".join(f"{k}: {v}" for k, v in row.items())
-            for row in cypher_rows
-        )
-        if contexto_directo:
-            contexto_cypher = f"{contexto_cypher}\n\n---\n\n{contexto_directo}"
-        if verbose or trace:
-            print(f"[resintetizar desde Cypher] {len(cypher_rows)} filas, {len(contexto_cypher)} chars")
-        respuesta = _sintetizar_respuesta(
-            get_llm(log_llm=log_llm),
-            query,
-            contexto_cypher,
-            articulos_objetivo=articulos_objetivo,
-        )
-        respuesta_lower = respuesta.lower()
-        no_encontro = "no regula expresamente" in respuesta_lower
-
-    if no_encontro and contexto_directo:
-        if verbose or trace:
-            print("[resintetizar directo] Usando texto integro del/los articulo(s) solicitado(s).")
-        respuesta = _sintetizar_respuesta(
-            get_llm(log_llm=log_llm),
-            query,
-            contexto_directo,
-            articulos_objetivo=articulos_objetivo,
-        )
-        respuesta_lower = respuesta.lower()
-        no_encontro = "no regula expresamente" in respuesta_lower
-
-    if no_encontro:
-        contexto_fallback = _fallback_texto(query)
-        if contexto_fallback:
-            if verbose or trace:
-                print(f"[fallback] Buscando por palabras clave... ({len(contexto_fallback)} chars de contexto)")
-            respuesta = _sintetizar_respuesta(
-                get_llm(log_llm=log_llm),
-                query,
-                contexto_fallback,
-                articulos_objetivo=articulos_objetivo,
-            )
-        else:
-            respuesta = "La Ley 22/2014 no regula expresamente este aspecto en los artículos consultados."
-
     contexto_cypher = "\n\n---\n\n".join(
         "\n".join(f"{k}: {v}" for k, v in row.items())
         for row in cypher_rows
     ) if cypher_rows else ""
-    contexto_validacion = "\n\n---\n\n".join(c for c in [contexto_cypher, contexto_directo] if c)
-    return _validar_y_reforzar_citas(
+
+    contexto_principal = "\n\n---\n\n".join(c for c in [contexto_cypher, contexto_directo] if c)
+    if not contexto_principal:
+        contexto_principal = _fallback_texto(query)
+        if contexto_principal and (verbose or trace):
+            print(f"[fallback] Contexto recuperado por texto ({len(contexto_principal)} chars)")
+
+    if not contexto_principal:
+        return NO_CONTEXT_RESPONSE
+
+    if verbose or trace:
+        print(f"[sintesis] Contexto final para respuesta: {len(contexto_principal)} chars")
+
+    respuesta = _sintetizar_respuesta(
+        llm,
+        query,
+        contexto_principal,
+        articulos_objetivo=articulos_objetivo,
+    )
+    respuesta = _validar_y_reforzar_citas(
         respuesta,
         query,
-        contexto_validacion,
+        contexto_principal,
         log_llm=log_llm,
         verbose=verbose,
         trace=trace,
         articulos_contexto=articulos_directos,
+    )
+    return _filtrar_respuesta_por_groundedness(
+        query=query,
+        respuesta=respuesta,
+        contexto=contexto_principal,
+        log_llm=log_llm,
+        verbose=verbose,
+        trace=trace,
     )
 
 
@@ -1279,50 +1578,64 @@ def generar_respuesta_grafo(query: str, articulos: list[dict], log_llm: bool = F
     """Genera respuesta con el LLM dado el contexto del grafo."""
     articulos_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
+    ids_semilla = _semillas_articulos_query(query)
+    tipo_pregunta = _clasificar_pregunta(query)
     articulos_directos = _recuperar_articulos_objetivo(query, expandir=True, verbose=False)
     articulos = _merge_articulos(articulos, articulos_directos)
+    articulos = _rerank_articulos(
+        query,
+        articulos,
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=False,
+    )[:RERANK_TOP_ARTICULOS]
 
     if not articulos:
-        return "No se encontraron artículos relevantes en el grafo para responder esta pregunta."
+        return NO_CONTEXT_RESPONSE
 
+    articulos_completos = _articulos_completos_para_query(
+        query,
+        articulos,
+        ids_objetivo=ids_objetivo,
+        numeros_objetivo=articulos_objetivo,
+        ids_semilla=ids_semilla,
+    )
     contexto = construir_contexto(
         articulos,
-        articulos_completos=set(ids_objetivo) | set(articulos_objetivo),
+        query=query,
+        articulos_completos=articulos_completos,
         ids_prioritarios=ids_objetivo,
     )
     llm = get_llm(log_llm=log_llm)
 
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    system = """Eres un asistente jurídico experto en la Ley 22/2014 de entidades de capital-riesgo \
-y entidades de inversión colectiva de tipo cerrado (España).
-
-Responde la pregunta basándote EXCLUSIVAMENTE en los artículos proporcionados.
-- Cita siempre el número de artículo.
-- Si la pregunta menciona un artículo concreto, debes citar ese número exacto.
-- Si el contexto trae el texto completo del artículo solicitado, inclúyelo de forma íntegra.
--Después de citar el artículo, limita la explicación a reformular o resumir su contenido.
--No añadas información externa ni explicaciones doctrinales.
-- Si la información es insuficiente, indícalo claramente.
-- Responde en español, de forma estructurada."""
-
-    human = f"""Pregunta: {query}
-
-Artículos del grafo:
-{contexto}"""
-
-    response = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
-    return _validar_y_reforzar_citas(
-        response.content,
+    respuesta = _sintetizar_respuesta(
+        llm,
+        query,
+        contexto,
+        articulos_objetivo=articulos_objetivo,
+    )
+    respuesta = _validar_y_reforzar_citas(
+        respuesta,
         query,
         contexto,
         log_llm=log_llm,
         articulos_contexto=articulos,
     )
+    return _filtrar_respuesta_por_groundedness(
+        query=query,
+        respuesta=respuesta,
+        contexto=contexto,
+        log_llm=log_llm,
+    )
 
 
 def consulta_grafo(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
     """Recuperación manual por grafo + expansión de subgrafo."""
+    if _clasificar_pregunta(query) == "articulo_directo":
+        articulos = _recuperar_articulos_objetivo(query, expandir=False, verbose=verbose or trace)
+        return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
+
     driver = get_driver()
     try:
         articulos = buscar_articulos(driver, query, verbose=verbose or trace)
@@ -1378,8 +1691,15 @@ def _has_vector_index(driver) -> bool:
 
 def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
     """Recuperación semántica con embeddings a nivel Chunk."""
+    if _clasificar_pregunta(query) == "articulo_directo":
+        articulos = _recuperar_articulos_objetivo(query, expandir=False, verbose=verbose or trace)
+        return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
+
+    retrieval_query = expand_query(query)
     articulos_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
+    ids_semilla = _semillas_articulos_query(query)
+    tipo_pregunta = _clasificar_pregunta(query)
 
     def _get_emb(model_name: str):
         try:
@@ -1426,7 +1746,9 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
     if emb is None:
         raise RuntimeError("No se pudo inicializar ningún modelo de embeddings para vector search.")
 
-    vector = emb.embed_query(query)
+    if (verbose or trace) and retrieval_query != query:
+        print(f"[expansion] Query expandida para vector search: {retrieval_query}")
+    vector = emb.embed_query(retrieval_query)
 
     driver = get_driver()
     resultados: dict[str, dict] = {}
@@ -1480,16 +1802,21 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
             for art in _vector_search_fallback(driver, vector):
                 _guardar_articulo(art)
 
-        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo)) if ids_objetivo else []
-        ids_semilla = list(dict.fromkeys(ids_objetivo + [a.get("id") for a in resultados.values() if a.get("id")]))
+        direct_ids = _dedupe_preservando_orden(ids_objetivo + ids_semilla)
+        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, direct_ids)) if direct_ids else []
+        ids_expansion = list(dict.fromkeys(direct_ids + [a.get("id") for a in resultados.values() if a.get("id")]))
         expandidos = _adjuntar_chunks_articulos(
             driver,
-            _expandir_subgrafo(driver, ids_semilla, verbose=verbose or trace),
+            _expandir_subgrafo(driver, ids_expansion, verbose=verbose or trace),
             limit_per_article=1,
-        ) if ids_semilla else []
-        articulos = _ordenar_articulos(
+        ) if ids_expansion else []
+        articulos = _rerank_articulos(
+            query,
             _merge_articulos(directos, list(resultados.values()), expandidos),
+            tipo_pregunta=tipo_pregunta,
             ids_prioritarios=ids_objetivo,
+            ids_semilla=ids_semilla,
+            verbose=verbose or trace,
         )[:MAX_ARTICULOS_CONTEXTO]
 
     driver.close()
