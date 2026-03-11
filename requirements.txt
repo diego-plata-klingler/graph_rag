@@ -1,0 +1,22 @@
+# Graph RAG con Neo4j + LangChain
+# Instalar con: pip install -r requirements.txt
+
+# Neo4j
+neo4j>=5.0.0
+langchain-neo4j>=0.3.0
+
+# LangChain
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+langchain-experimental>=0.3.0   # LLMGraphTransformer
+
+# OpenAI
+openai>=1.0.0
+
+# PDF
+pymupdf>=1.23.0
+
+# Utils
+python-dotenv>=1.0.0
+tqdm>=4.66.0

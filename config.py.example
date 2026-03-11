@@ -1,0 +1,48 @@
+"""
+Configuración central del proyecto Graph RAG.
+Copia este archivo como config.py y rellena tus credenciales:
+    cp config.py.example config.py
+"""
+
+# ──────────────────────────────────────────────
+# Neo4j
+# ──────────────────────────────────────────────
+# URI de conexión. Si usas Docker local, déjalo como está.
+NEO4J_URI      = "bolt://localhost:7687"
+NEO4J_USER     = "neo4j"
+NEO4J_PASSWORD = "password"   # Cámbialo al que hayas puesto al arrancar Neo4j
+
+# ──────────────────────────────────────────────
+# OpenAI
+# ──────────────────────────────────────────────
+OPENAI_API_KEY = "sk-proj-TU_CLAVE_AQUI"
+
+LLM_MODEL       = "gpt-4o-mini"   # Usa "gpt-4o" para mejor calidad en extracción de entidades
+# Modelo de embeddings. Si tu proyecto no tiene acceso a text-embedding-3-large, usa text-embedding-3-small
+EMBED_MODEL     = "text-embedding-3-small"
+
+# Habilita la creación y uso del índice vectorial en Neo4j.
+# Neo4j Community NO soporta índices vectoriales; si estás usando Community, déjalo en False.
+# Si quieres utilizar vector search nativo en Neo4j, usa Neo4j Enterprise / Aura y ponlo en True.
+USE_VECTOR_INDEX = True
+
+# ──────────────────────────────────────────────
+# Documento
+# ──────────────────────────────────────────────
+PDF_PATH        = "ruta/al/documento.pdf"
+
+# Directorio de datos intermedios (se crea automáticamente)
+DATA_DIR        = "data"
+ARTICULOS_JSON  = f"{DATA_DIR}/articulos.json"
+
+# ──────────────────────────────────────────────
+# Opciones de construcción del grafo
+# ──────────────────────────────────────────────
+# Si True, usa LLMGraphTransformer para extraer entidades de cada artículo.
+# Esto cuesta tokens pero da más nodos de entidad en el grafo.
+# Si False, solo extrae la estructura jerárquica + referencias cruzadas (gratuito).
+USAR_LLM_TRANSFORMER = True   # Cambia a False si no quieres que el LLM extraiga entidades/relaciones adicionales
+
+# Máximo de artículos a procesar con LLMGraphTransformer (para controlar coste).
+# -1 = procesar todos.
+MAX_ARTICULOS_LLM = -1
