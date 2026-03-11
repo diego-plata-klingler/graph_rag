@@ -61,6 +61,10 @@ MAX_CHUNKS_POR_ARTICULO = 2
 FULLTEXT_CHUNK_CANDIDATES = 30
 FULLTEXT_ARTICULO_CANDIDATES = 12
 RERANK_TOP_ARTICULOS = 6
+TOP_ARTICULOS_PARA_VECINOS = 3
+DELTA_ARTICULOS_VECINOS = 2
+TOP_ARTICULOS_PARA_CHUNKS_VECINOS = 3
+DELTA_CHUNKS_VECINOS = 2
 NO_CONTEXT_RESPONSE = "NO ENCONTRADO EN EL CONTEXTO"
 
 _STOPWORDS_RERANK = {
@@ -750,9 +754,35 @@ def _seleccionar_chunks_relevantes(query: str, chunks: list[dict], limit: int = 
         candidatos.append(chunk_copy)
 
     candidatos.sort(key=lambda c: (-float(c.get("query_score") or 0.0), c.get("orden", 10**9), c.get("id", "")))
-    for chunk in candidatos:
+    if not candidatos:
+        return []
+
+    seleccionados = [candidatos[0]]
+    restantes = candidatos[1:]
+
+    orden_semilla = seleccionados[0].get("orden")
+    if limit > 1 and orden_semilla is not None:
+        vecinos = []
+        otros = []
+        for chunk in restantes:
+            orden = chunk.get("orden")
+            if orden is not None and abs(int(orden) - int(orden_semilla)) <= DELTA_CHUNKS_VECINOS:
+                vecinos.append(chunk)
+            else:
+                otros.append(chunk)
+        vecinos.sort(
+            key=lambda c: (
+                abs(int(c.get("orden")) - int(orden_semilla)),
+                -float(c.get("query_score") or 0.0),
+                c.get("id", ""),
+            )
+        )
+        restantes = vecinos + otros
+
+    seleccionados.extend(restantes[:max(limit - 1, 0)])
+    for chunk in seleccionados:
         chunk.pop("query_score", None)
-    return candidatos[:limit]
+    return seleccionados[:limit]
 
 
 def _es_respuesta_no_contexto(respuesta: str) -> bool:
@@ -942,6 +972,149 @@ def _fetch_chunks_by_article_ids(driver, ids: list[str], limit_per_article: int 
     return chunks_por_articulo
 
 
+def _fetch_vecinos_articulos(
+    driver,
+    articulos_semilla: list[dict],
+    delta: int = DELTA_ARTICULOS_VECINOS,
+    exclude_ids: list[str] | None = None,
+) -> list[dict]:
+    if not articulos_semilla:
+        return []
+
+    rangos = set()
+    for articulo in articulos_semilla:
+        base = _numero_base_articulo(articulo)
+        if base >= 10**9:
+            continue
+        rangos.update(n for n in range(base - delta, base + delta + 1) if n > 0)
+
+    if not rangos:
+        return []
+
+    with driver.session() as s:
+        rows = s.run(
+            """
+            MATCH (a:Articulo)
+            WITH a, toInteger(split(a.numero, ' ')[0]) AS numero_base
+            WHERE numero_base IN $rangos AND NOT (a.id IN $exclude_ids)
+            RETURN a
+            ORDER BY numero_base ASC, a.numero ASC
+            """,
+            rangos=sorted(rangos),
+            exclude_ids=exclude_ids or [],
+        ).data()
+    return [dict(row["a"]) for row in rows if row.get("a")]
+
+
+def _expandir_chunks_vecinos(
+    driver,
+    articulos: list[dict],
+    articulos_semilla: list[dict],
+    query: str,
+    delta: int = DELTA_CHUNKS_VECINOS,
+    verbose: bool = False,
+) -> list[dict]:
+    if not articulos or not articulos_semilla:
+        return articulos
+
+    seed_chunks_por_articulo: dict[str, list[dict]] = {}
+    for articulo in articulos_semilla[:TOP_ARTICULOS_PARA_CHUNKS_VECINOS]:
+        art_id = articulo.get("id")
+        if not art_id:
+            continue
+        chunks_seed = _seleccionar_chunks_relevantes(query, articulo.get("chunks_relevantes", []), limit=1)
+        if chunks_seed:
+            seed_chunks_por_articulo[art_id] = chunks_seed
+
+    if not seed_chunks_por_articulo:
+        return articulos
+
+    vecinos_por_articulo: dict[str, list[dict]] = {}
+    with driver.session() as s:
+        for art_id, chunks_seed in seed_chunks_por_articulo.items():
+            ordenes = [int(chunk.get("orden")) for chunk in chunks_seed if chunk.get("orden") is not None]
+            if not ordenes:
+                continue
+            min_orden = min(ordenes) - delta
+            max_orden = max(ordenes) + delta
+            rows = s.run(
+                """
+                MATCH (:Articulo {id: $art_id})-[:TIENE_CHUNK]->(c:Chunk)
+                WHERE c.orden >= $min_orden AND c.orden <= $max_orden
+                RETURN c
+                ORDER BY c.orden ASC
+                """,
+                art_id=art_id,
+                min_orden=min_orden,
+                max_orden=max_orden,
+            ).data()
+            score_vecino = max((_score_chunk(chunk) for chunk in chunks_seed), default=0.0) * 0.8
+            vecinos = []
+            for row in rows:
+                chunk = dict(row["c"])
+                chunk["score"] = max(float(chunk.get("score") or 0.0), score_vecino, 0.01)
+                vecinos.append(chunk)
+            vecinos_por_articulo[art_id] = vecinos
+
+    if verbose and vecinos_por_articulo:
+        total = sum(len(chunks) for chunks in vecinos_por_articulo.values())
+        print(f"  [vecinos locales] chunks vecinos recuperados: {total}")
+
+    enriquecidos = []
+    for articulo in articulos:
+        art_copy = dict(articulo)
+        art_id = art_copy.get("id")
+        art_copy["chunks_relevantes"] = _merge_chunks(
+            art_copy.get("chunks_relevantes", []),
+            vecinos_por_articulo.get(art_id, []),
+        )
+        enriquecidos.append(art_copy)
+    return enriquecidos
+
+
+def _expandir_vecindad_local(
+    driver,
+    query: str,
+    articulos: list[dict],
+    tipo_pregunta: str,
+    ids_prioritarios: list[str] | None = None,
+    ids_semilla: list[str] | None = None,
+    verbose: bool = False,
+) -> list[dict]:
+    if not articulos:
+        return []
+
+    articulos_top = articulos[:TOP_ARTICULOS_PARA_VECINOS]
+    vecinos_articulos = _fetch_vecinos_articulos(
+        driver,
+        articulos_top,
+        exclude_ids=[art.get("id") for art in articulos if art.get("id")],
+    )
+    if vecinos_articulos:
+        vecinos_articulos = _adjuntar_chunks_articulos(driver, vecinos_articulos)
+        for articulo in vecinos_articulos:
+            articulo["score"] = max(float(articulo.get("score") or 0.0), 0.01)
+        if verbose:
+            print(f"  [vecinos locales] artículos vecinos recuperados: {len(vecinos_articulos)}")
+
+    combinados = _merge_articulos(articulos, vecinos_articulos)
+    combinados = _expandir_chunks_vecinos(
+        driver,
+        combinados,
+        articulos_top,
+        query=query,
+        verbose=verbose,
+    )
+    return _rerank_articulos(
+        query,
+        combinados,
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_prioritarios,
+        ids_semilla=ids_semilla,
+        verbose=verbose,
+    )
+
+
 def _adjuntar_chunks_articulos(driver, articulos: list[dict], limit_per_article: int | None = None) -> list[dict]:
     ids = [art.get("id") for art in articulos if art.get("id")]
     chunks_por_articulo = _fetch_chunks_by_article_ids(driver, ids, limit_per_article=limit_per_article)
@@ -1026,19 +1199,37 @@ def _recuperar_articulos_objetivo(query: str, expandir: bool = True, verbose: bo
         return []
 
     ids = [_articulo_id(n) for n in nums]
+    tipo_pregunta = _clasificar_pregunta(query)
     driver = get_driver()
     try:
         directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids))
         if verbose:
             print(f"  [articulo directo] solicitados={ids}, encontrados={len(directos)}")
         if not expandir:
-            return directos
+            return _expandir_vecindad_local(
+                driver,
+                query=query,
+                articulos=directos,
+                tipo_pregunta=tipo_pregunta,
+                ids_prioritarios=ids,
+                ids_semilla=ids,
+                verbose=verbose,
+            )[:MAX_ARTICULOS_CONTEXTO]
         vecinos = _adjuntar_chunks_articulos(
             driver,
             _expandir_subgrafo(driver, [a["id"] for a in directos] or ids, verbose=verbose),
             limit_per_article=1,
         )
-        return _ordenar_articulos(_merge_articulos(directos, vecinos), ids_prioritarios=ids)
+        combinados = _ordenar_articulos(_merge_articulos(directos, vecinos), ids_prioritarios=ids)
+        return _expandir_vecindad_local(
+            driver,
+            query=query,
+            articulos=combinados,
+            tipo_pregunta=tipo_pregunta,
+            ids_prioritarios=ids,
+            ids_semilla=ids,
+            verbose=verbose,
+        )[:MAX_ARTICULOS_CONTEXTO]
     finally:
         driver.close()
 
@@ -1201,6 +1392,15 @@ def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
     reordenados = _rerank_articulos(
         query,
         list(resultados.values()),
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=verbose,
+    )
+    reordenados = _expandir_vecindad_local(
+        driver,
+        query=query,
+        articulos=reordenados,
         tipo_pregunta=tipo_pregunta,
         ids_prioritarios=ids_objetivo,
         ids_semilla=ids_semilla,
@@ -1813,6 +2013,15 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
         articulos = _rerank_articulos(
             query,
             _merge_articulos(directos, list(resultados.values()), expandidos),
+            tipo_pregunta=tipo_pregunta,
+            ids_prioritarios=ids_objetivo,
+            ids_semilla=ids_semilla,
+            verbose=verbose or trace,
+        )
+        articulos = _expandir_vecindad_local(
+            driver,
+            query=query,
+            articulos=articulos,
             tipo_pregunta=tipo_pregunta,
             ids_prioritarios=ids_objetivo,
             ids_semilla=ids_semilla,
