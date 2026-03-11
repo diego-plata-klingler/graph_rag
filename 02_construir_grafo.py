@@ -9,6 +9,7 @@ Lee data/articulos.json y crea el siguiente esquema:
   (:Capitulo {id, texto, titulo_padre})
   (:Seccion  {id, texto})
   (:Articulo {id, numero, titulo, texto, titulo_padre, capitulo_padre, seccion_padre})
+  (:Chunk    {id, texto, orden, token_count, embedding, articulo_numero, articulo_titulo})
   (:Disposicion {id, titulo, texto})
   (:Entidad  {nombre})          ← SGEIC, CNMV, ECR…
   (:Concepto {nombre})          ← autorización, capital mínimo…
@@ -17,6 +18,7 @@ Lee data/articulos.json y crea el siguiente esquema:
   ──────────
   (Articulo)-[:PERTENECE_A]->(Titulo)
   (Articulo)-[:PERTENECE_A]->(Capitulo)
+  (Articulo)-[:TIENE_CHUNK]->(Chunk)
   (Articulo)-[:REFERENCIA]->(Articulo)   ← "conforme al artículo X"
   (Articulo)-[:MENCIONA]->(Entidad)
   (Articulo)-[:TRATA_SOBRE]->(Concepto)
@@ -64,6 +66,7 @@ def get_driver():
 
 CONSTRAINTS = [
     "CREATE CONSTRAINT articulo_id IF NOT EXISTS FOR (a:Articulo) REQUIRE a.id IS UNIQUE",
+    "CREATE CONSTRAINT chunk_id    IF NOT EXISTS FOR (c:Chunk)    REQUIRE c.id IS UNIQUE",
     "CREATE CONSTRAINT titulo_id   IF NOT EXISTS FOR (t:Titulo)   REQUIRE t.id IS UNIQUE",
     "CREATE CONSTRAINT capitulo_id IF NOT EXISTS FOR (c:Capitulo) REQUIRE c.id IS UNIQUE",
     "CREATE CONSTRAINT seccion_id  IF NOT EXISTS FOR (s:Seccion)  REQUIRE s.id IS UNIQUE",
@@ -84,20 +87,21 @@ def crear_schema(driver, embed_dim=None, use_vector_index: bool = True):
 
         indices = [
             "CREATE FULLTEXT INDEX articulo_texto IF NOT EXISTS FOR (a:Articulo) ON EACH [a.titulo, a.texto]",
+            "CREATE FULLTEXT INDEX chunk_texto IF NOT EXISTS FOR (c:Chunk) ON EACH [c.texto, c.articulo_titulo, c.titulo_padre, c.capitulo_padre, c.seccion_padre, c.disposicion_titulo]",
             "CREATE FULLTEXT INDEX entidad_nombre IF NOT EXISTS FOR (e:Entidad)  ON EACH [e.nombre]",
         ]
 
         if embed_dim is not None and use_vector_index:
             indices.append(
-                f"CREATE INDEX articulo_vector IF NOT EXISTS FOR (a:Articulo) "
-                f"ON (a.embedding) OPTIONS {{indexProvider: 'vector-1', dimensions: {embed_dim}}}"
+                f"CREATE INDEX chunk_vector IF NOT EXISTS FOR (c:Chunk) "
+                f"ON (c.embedding) OPTIONS {{indexProvider: 'vector-1', dimensions: {embed_dim}}}"
             )
         elif use_vector_index:
             # Si se solicitó vector index pero no podemos determinar dimensiones,
             # intentamos crear el índice con la dimensión por defecto.
             indices.append(
-                f"CREATE INDEX articulo_vector IF NOT EXISTS FOR (a:Articulo) "
-                f"ON (a.embedding) OPTIONS {{indexProvider: 'vector-1', dimensions: {embed_dim or 1536}}}"
+                f"CREATE INDEX chunk_vector IF NOT EXISTS FOR (c:Chunk) "
+                f"ON (c.embedding) OPTIONS {{indexProvider: 'vector-1', dimensions: {embed_dim or 1536}}}"
             )
 
         for q in indices:
@@ -117,9 +121,9 @@ def crear_schema(driver, embed_dim=None, use_vector_index: bool = True):
         if use_vector_index and embed_dim is not None:
             try:
                 result = s.run("SHOW INDEXES")
-                found = any(r.data().get("name") == "articulo_vector" for r in result)
+                found = any(r.data().get("name") == "chunk_vector" for r in result)
                 if not found:
-                    print("[info] El índice vectorial 'articulo_vector' no está disponible en este Neo4j; la búsqueda vectorial nativa no funcionará.")
+                    print("[info] El índice vectorial 'chunk_vector' no está disponible en este Neo4j; la búsqueda vectorial nativa no funcionará.")
             except Exception:
                 # En algunas versiones/ediciones SHOW INDEXES puede no existir, ignoramos.
                 pass
@@ -164,84 +168,137 @@ def crear_titulos_capitulos(driver, estructura: dict):
             s.run("MERGE (n:Seccion {id: $id}) SET n.texto = $texto", id=sid, texto=sec)
 
 
-def crear_articulos(driver, articulos: list[dict], emb_model):
-    """Crea nodos Articulo y sus relaciones jerárquicas.
-
-    Para mejorar la calidad de la búsqueda semántica, los embeddings se calculan
-en batches y se basan en el título + el texto del artículo.
-    """
-
-    batch_size = 50
-
+def crear_articulos(driver, articulos: list[dict]):
+    """Crea nodos Articulo y sus relaciones jerárquicas."""
     with driver.session() as s:
-        for inicio in range(0, len(articulos), batch_size):
-            batch = articulos[inicio:inicio + batch_size]
+        for art in articulos:
+            texto = art.get("texto", "")[:12000]
+            s.run("""
+                MERGE (a:Articulo {id: $id})
+                SET a.numero         = $numero,
+                    a.titulo         = $titulo,
+                    a.texto          = $texto,
+                    a.titulo_padre   = $titulo_padre,
+                    a.capitulo_padre = $capitulo_padre,
+                    a.seccion_padre  = $seccion_padre,
+                    a.num_chunks     = $num_chunks
+            """,
+                id=art["id"],
+                numero=art["numero"],
+                titulo=art["titulo"],
+                texto=texto,
+                titulo_padre=art.get("titulo_padre") or "",
+                capitulo_padre=art.get("capitulo_padre") or "",
+                seccion_padre=art.get("seccion_padre") or "",
+                num_chunks=art.get("num_chunks") or 0,
+            )
 
-            textos_para_embed = []
-            for art in batch:
-                texto = art.get("texto", "")[:8000]  # límite para Neo4j
-                titulo = art.get("titulo", "")
-                textos_para_embed.append(f"{titulo}\n\n{texto}" if titulo else texto)
+            if art.get("titulo_padre"):
+                tid = _id_seguro(art["titulo_padre"])
+                s.run("""
+                    MATCH (a:Articulo {id: $aid}), (t:Titulo {id: $tid})
+                    MERGE (a)-[:PERTENECE_A]->(t)
+                """, aid=art["id"], tid=tid)
 
+            if art.get("capitulo_padre"):
+                cid = _id_seguro(art["capitulo_padre"])
+                s.run("""
+                    MATCH (a:Articulo {id: $aid}), (c:Capitulo {id: $cid})
+                    MERGE (a)-[:PERTENECE_A]->(c)
+                """, aid=art["id"], cid=cid)
+
+            if art.get("seccion_padre"):
+                sid = _id_seguro(art["seccion_padre"])
+                s.run("""
+                    MATCH (a:Articulo {id: $aid}), (sec:Seccion {id: $sid})
+                    MERGE (a)-[:PERTENECE_A]->(sec)
+                """, aid=art["id"], sid=sid)
+
+
+def _embed_documents_with_fallback(emb_model, textos: list[str], rango: str):
+    """Genera embeddings con fallback al modelo pequeño si hace falta."""
+    try:
+        return emb_model.embed_documents(textos), emb_model
+    except Exception as e:
+        msg = str(e)
+        print(f"[embed] Error al crear embeddings para {rango}: {e}")
+
+        if "model_not_found" in msg or "does not have access" in msg:
+            print("[embed] Modelo no accesible; reintentando con text-embedding-3-small...")
+            emb_model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
             try:
-                embeddings = emb_model.embed_documents(textos_para_embed)
-            except Exception as e:
-                msg = str(e)
-                print(f"[embed] Error al crear embeddings para artículos {inicio}-{inicio+len(batch)-1}: {e}")
+                return emb_model.embed_documents(textos), emb_model
+            except Exception as e2:
+                print(f"[embed] Error al reintentar con text-embedding-3-small: {e2}")
+        return [None] * len(textos), emb_model
 
-                # Si el modelo no está disponible para el proyecto, intentar con el modelo pequeño.
-                if "model_not_found" in msg or "does not have access" in msg:
-                    print("[embed] Modelo no accesible; reintentando con text-embedding-3-small...")
-                    emb_model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
-                    try:
-                        embeddings = emb_model.embed_documents(textos_para_embed)
-                    except Exception as e2:
-                        print(f"[embed] Error al reintentar con text-embedding-3-small: {e2}")
-                        embeddings = [None] * len(batch)
-                else:
-                    embeddings = [None] * len(batch)
 
-            for art, embedding in zip(batch, embeddings):
-                texto = art.get("texto", "")[:8000]
+def crear_chunks(driver, chunks: list[dict], emb_model):
+    """Crea nodos Chunk con embeddings y enlace al artículo o disposición."""
+    if not chunks:
+        return emb_model
+
+    batch_size = 64
+    with driver.session() as s:
+        for inicio in range(0, len(chunks), batch_size):
+            batch = chunks[inicio:inicio + batch_size]
+            textos = [chunk.get("texto", "")[:12000] for chunk in batch]
+            embeddings, emb_model = _embed_documents_with_fallback(
+                emb_model,
+                textos,
+                f"chunks {inicio}-{inicio + len(batch) - 1}",
+            )
+
+            for chunk, embedding in zip(batch, embeddings):
                 if embedding is None:
                     embedding = []
 
-                # Nodo artículo
                 s.run("""
-                    MERGE (a:Articulo {id: $id})
-                    SET a.numero       = $numero,
-                        a.titulo       = $titulo,
-                        a.texto        = $texto,
-                        a.titulo_padre   = $titulo_padre,
-                        a.capitulo_padre = $capitulo_padre,
-                        a.seccion_padre  = $seccion_padre,
-                        a.embedding     = $embedding
+                    MERGE (c:Chunk {id: $id})
+                    SET c.texto             = $texto,
+                        c.orden             = $orden,
+                        c.token_count       = $token_count,
+                        c.parent_id         = $parent_id,
+                        c.parent_tipo       = $parent_tipo,
+                        c.articulo_id       = $articulo_id,
+                        c.articulo_numero   = $articulo_numero,
+                        c.articulo_titulo   = $articulo_titulo,
+                        c.titulo_padre      = $titulo_padre,
+                        c.capitulo_padre    = $capitulo_padre,
+                        c.seccion_padre     = $seccion_padre,
+                        c.disposicion_id    = $disposicion_id,
+                        c.disposicion_titulo = $disposicion_titulo,
+                        c.embedding         = $embedding
                 """,
-                    id=art["id"],
-                    numero=art["numero"],
-                    titulo=art["titulo"],
-                    texto=texto,
-                    titulo_padre=art.get("titulo_padre") or "",
-                    capitulo_padre=art.get("capitulo_padre") or "",
-                    seccion_padre=art.get("seccion_padre") or "",
+                    id=chunk["id"],
+                    texto=chunk.get("texto", "")[:12000],
+                    orden=chunk.get("orden", 0),
+                    token_count=chunk.get("token_count", 0),
+                    parent_id=chunk.get("parent_id", ""),
+                    parent_tipo=chunk.get("parent_tipo", ""),
+                    articulo_id=chunk.get("articulo_id", ""),
+                    articulo_numero=chunk.get("articulo_numero", ""),
+                    articulo_titulo=chunk.get("articulo_titulo", ""),
+                    titulo_padre=chunk.get("titulo_padre", ""),
+                    capitulo_padre=chunk.get("capitulo_padre", ""),
+                    seccion_padre=chunk.get("seccion_padre", ""),
+                    disposicion_id=chunk.get("disposicion_id", ""),
+                    disposicion_titulo=chunk.get("disposicion_titulo", ""),
                     embedding=embedding,
                 )
 
-                # Relación con Título padre
-                if art.get("titulo_padre"):
-                    tid = _id_seguro(art["titulo_padre"])
+                if chunk.get("parent_tipo") == "articulo":
                     s.run("""
-                        MATCH (a:Articulo {id: $aid}), (t:Titulo {id: $tid})
-                        MERGE (a)-[:PERTENECE_A]->(t)
-                    """, aid=art["id"], tid=tid)
+                        MATCH (a:Articulo {id: $parent_id}), (c:Chunk {id: $chunk_id})
+                        MERGE (a)-[:TIENE_CHUNK]->(c)
+                    """, parent_id=chunk["parent_id"], chunk_id=chunk["id"])
+                elif chunk.get("parent_tipo") == "disposicion":
+                    s.run("""
+                        MATCH (d:Disposicion {id: $parent_id}), (c:Chunk {id: $chunk_id})
+                        MERGE (d)-[:TIENE_CHUNK]->(c)
+                    """, parent_id=chunk["parent_id"], chunk_id=chunk["id"])
 
-                # Relación con Capítulo padre
-                if art.get("capitulo_padre"):
-                    cid = _id_seguro(art["capitulo_padre"])
-                    s.run("""
-                        MATCH (a:Articulo {id: $aid}), (c:Capitulo {id: $cid})
-                        MERGE (a)-[:PERTENECE_A]->(c)
-                    """, aid=art["id"], cid=cid)
+    return emb_model
 
 
 def crear_referencias_cruzadas(driver, articulos: list[dict]):
@@ -288,8 +345,13 @@ def crear_disposiciones(driver, disposiciones: list[dict]):
         for disp in disposiciones:
             s.run("""
                 MERGE (d:Disposicion {id: $id})
-                SET d.titulo = $titulo, d.texto = $texto
-            """, id=disp["id"], titulo=disp["titulo"], texto=disp.get("texto", "")[:4000])
+                SET d.titulo = $titulo, d.texto = $texto, d.num_chunks = $num_chunks
+            """,
+                id=disp["id"],
+                titulo=disp["titulo"],
+                texto=disp.get("texto", "")[:4000],
+                num_chunks=disp.get("num_chunks") or 0,
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -330,6 +392,7 @@ def enriquecer_con_llm(driver, articulos: list[dict]):
     schema_manual = """
     Node properties:
     - Articulo: id (STRING), numero (STRING), titulo (STRING), texto (STRING), titulo_padre (STRING), capitulo_padre (STRING), seccion_padre (STRING)
+    - Chunk: id (STRING), texto (STRING), orden (INTEGER), token_count (INTEGER), articulo_id (STRING), articulo_numero (STRING), articulo_titulo (STRING)
     - Titulo: id (STRING), texto (STRING)
     - Capitulo: id (STRING), texto (STRING)
     - Seccion: id (STRING), texto (STRING)
@@ -341,6 +404,7 @@ def enriquecer_con_llm(driver, articulos: list[dict]):
     - (:Articulo)-[:PERTENECE_A]->(:Titulo)
     - (:Articulo)-[:PERTENECE_A]->(:Capitulo)
     - (:Articulo)-[:PERTENECE_A]->(:Seccion)
+    - (:Articulo)-[:TIENE_CHUNK]->(:Chunk)
     - (:Articulo)-[:REFERENCIA]->(:Articulo)
     - (:Articulo)-[:MENCIONA]->(:Entidad)
     - (:Articulo)-[:TRATA_SOBRE]->(:Concepto)
@@ -404,7 +468,8 @@ def main():
 
     articulos    = estructura["articulos"]
     disposiciones = estructura["disposiciones"]
-    print(f"   {len(articulos)} artículos, {len(disposiciones)} disposiciones")
+    chunks = estructura.get("chunks", [])
+    print(f"   {len(articulos)} artículos, {len(disposiciones)} disposiciones, {len(chunks)} chunks")
 
     # Conectar a Neo4j
     print(f"\n🔌  Conectando a Neo4j ({NEO4J_URI})...")
@@ -444,20 +509,23 @@ def main():
 
     # Nodos y relaciones
     print("\n🏗️  Construyendo grafo:")
-    print("  [1/5] Títulos, capítulos y secciones...")
+    print("  [1/6] Títulos, capítulos y secciones...")
     crear_titulos_capitulos(driver, estructura)
 
-    print("  [2/5] Artículos...")
-    crear_articulos(driver, articulos, emb_model)
+    print("  [2/6] Artículos...")
+    crear_articulos(driver, articulos)
 
-    print("  [3/5] Referencias cruzadas...")
+    print("  [3/6] Referencias cruzadas...")
     crear_referencias_cruzadas(driver, articulos)
 
-    print("  [4/5] Entidades y conceptos...")
+    print("  [4/6] Entidades y conceptos...")
     crear_entidades_y_conceptos(driver, articulos)
 
-    print("  [5/5] Disposiciones...")
+    print("  [5/6] Disposiciones...")
     crear_disposiciones(driver, disposiciones)
+
+    print("  [6/6] Chunks + embeddings...")
+    emb_model = crear_chunks(driver, chunks, emb_model)
 
     # Opcional: LLMGraphTransformer
     if USAR_LLM_TRANSFORMER:

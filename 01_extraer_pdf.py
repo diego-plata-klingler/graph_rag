@@ -1,9 +1,10 @@
 """
-Script 1: Extrae y parsea el texto del PDF.
+Script 1: Extrae, parsea y chunkifica el texto del PDF.
 
 Genera data/articulos.json con la estructura jerárquica de la ley:
   - Títulos, Capítulos, Secciones
   - Artículos (con texto completo)
+  - Chunks estructurados por artículo y disposición
   - Referencias cruzadas entre artículos ("conforme al artículo X")
   - Disposiciones adicionales / finales / transitorias
 
@@ -20,6 +21,12 @@ import fitz  # pymupdf
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import PDF_PATH, DATA_DIR, ARTICULOS_JSON
+from chunking_utils import (
+    MarkdownChunker,
+    build_article_markdown,
+    build_disposition_markdown,
+    clean_legal_text,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -162,8 +169,9 @@ def parsear_estructura(texto: str) -> dict:
                 articulo_actual = None
                 return
 
-            art["texto"] = f"Artículo {art['numero']}. {titulo_art}\n{texto_art}"
-            art["referencias"] = extraer_referencias(texto_art + " " + titulo_art)
+            texto_completo = clean_legal_text(f"Artículo {art['numero']}. {titulo_art}\n{texto_art}")
+            art["texto"] = texto_completo
+            art["referencias"] = extraer_referencias(texto_completo)
             del art["_lineas_texto"]
             articulos.append(art)
             articulo_actual = None
@@ -172,7 +180,7 @@ def parsear_estructura(texto: str) -> dict:
         nonlocal disposicion_actual
         if disposicion_actual:
             disp = disposicion_actual
-            disp["texto"] = disp["_lineas_texto"].strip()
+            disp["texto"] = clean_legal_text(disp["_lineas_texto"].strip())
             del disp["_lineas_texto"]
             disposiciones.append(disp)
             disposicion_actual = None
@@ -332,6 +340,58 @@ def enriquecer_con_entidades(articulos: list[dict]) -> list[dict]:
     return articulos
 
 
+def generar_chunks_estructura(estructura: dict) -> list[dict]:
+    """Genera chunks estructurados usando la estrategia de rag_engine."""
+    chunker = MarkdownChunker()
+    chunks: list[dict] = []
+
+    for art in estructura["articulos"]:
+        markdown = build_article_markdown(art)
+        art_chunks = chunker.chunk(markdown)
+        art["chunk_ids"] = []
+        art["num_chunks"] = len(art_chunks)
+
+        for idx, chunk in enumerate(art_chunks):
+            chunk_id = f"{art['id']}_chunk_{idx:03d}"
+            art["chunk_ids"].append(chunk_id)
+            chunks.append({
+                "id": chunk_id,
+                "parent_id": art["id"],
+                "parent_tipo": "articulo",
+                "articulo_id": art["id"],
+                "articulo_numero": art["numero"],
+                "articulo_titulo": art["titulo"],
+                "titulo_padre": art.get("titulo_padre"),
+                "capitulo_padre": art.get("capitulo_padre"),
+                "seccion_padre": art.get("seccion_padre"),
+                "orden": chunk.order,
+                "texto": chunk.text,
+                "token_count": chunk.token_count,
+            })
+
+    for disp in estructura["disposiciones"]:
+        markdown = build_disposition_markdown(disp)
+        disp_chunks = chunker.chunk(markdown)
+        disp["chunk_ids"] = []
+        disp["num_chunks"] = len(disp_chunks)
+
+        for idx, chunk in enumerate(disp_chunks):
+            chunk_id = f"{disp['id']}_chunk_{idx:03d}"
+            disp["chunk_ids"].append(chunk_id)
+            chunks.append({
+                "id": chunk_id,
+                "parent_id": disp["id"],
+                "parent_tipo": "disposicion",
+                "disposicion_id": disp["id"],
+                "disposicion_titulo": disp["titulo"],
+                "orden": chunk.order,
+                "texto": chunk.text,
+                "token_count": chunk.token_count,
+            })
+
+    return chunks
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
@@ -349,6 +409,9 @@ def main():
     print("🔗  Enriqueciendo con entidades y conceptos...")
     estructura["articulos"] = enriquecer_con_entidades(estructura["articulos"])
 
+    print("✂️  Generando chunks estructurados...")
+    estructura["chunks"] = generar_chunks_estructura(estructura)
+
     # Estadísticas
     print(f"\n📊  Resultado:")
     print(f"   Títulos:      {len(estructura['titulos'])}")
@@ -356,6 +419,7 @@ def main():
     print(f"   Secciones:    {len(estructura['secciones'])}")
     print(f"   Artículos:    {len(estructura['articulos'])}")
     print(f"   Disposiciones:{len(estructura['disposiciones'])}")
+    print(f"   Chunks:       {len(estructura['chunks'])}")
 
     total_refs = sum(len(a["referencias"]) for a in estructura["articulos"])
     print(f"   Referencias:  {total_refs} (cruces entre artículos)")

@@ -55,6 +55,8 @@ if sys.platform.startswith("win"):
 # ──────────────────────────────────────────────────────────────────────────────
 MAX_ARTICULOS_CONTEXTO = 12
 MAX_CHARS_CONTEXTO = 15000
+MAX_CHUNKS_RELEVANTES = 18
+MAX_CHUNKS_POR_ARTICULO = 3
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Conexiones
@@ -121,6 +123,7 @@ def get_driver():
 _MANUAL_SCHEMA = """
 Node properties:
 - Articulo: id (STRING), numero (STRING), titulo (STRING), texto (STRING), titulo_padre (STRING), capitulo_padre (STRING), seccion_padre (STRING)
+- Chunk: id (STRING), texto (STRING), orden (INTEGER), token_count (INTEGER), articulo_id (STRING), articulo_numero (STRING), articulo_titulo (STRING), titulo_padre (STRING), capitulo_padre (STRING), seccion_padre (STRING), disposicion_id (STRING), disposicion_titulo (STRING)
 - Titulo: id (STRING), texto (STRING)
 - Capitulo: id (STRING), texto (STRING)
 - Seccion: id (STRING), texto (STRING)
@@ -132,6 +135,8 @@ Relationships:
 - (:Articulo)-[:PERTENECE_A]->(:Titulo)
 - (:Articulo)-[:PERTENECE_A]->(:Capitulo)
 - (:Articulo)-[:PERTENECE_A]->(:Seccion)
+- (:Articulo)-[:TIENE_CHUNK]->(:Chunk)
+- (:Disposicion)-[:TIENE_CHUNK]->(:Chunk)
 - (:Articulo)-[:REFERENCIA]->(:Articulo)
 - (:Articulo)-[:MENCIONA]->(:Entidad)
 - (:Articulo)-[:TRATA_SOBRE]->(:Concepto)
@@ -163,10 +168,10 @@ Cypher: MATCH (a:Articulo)
         RETURN a.numero, a.titulo, a.texto
 
 Pregunta: ¿Qué artículos regulan la autorización de SGEIC?
-Cypher: MATCH (a:Articulo)
-        WHERE (a.texto CONTAINS 'SGEIC' OR a.texto CONTAINS 'sociedad gestora')
-          AND (a.texto CONTAINS 'autorización' OR a.texto CONTAINS 'requisito' OR a.texto CONTAINS 'acceso a la actividad')
-        RETURN a.numero, a.titulo, a.texto LIMIT 5
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+        WHERE (c.texto CONTAINS 'SGEIC' OR c.texto CONTAINS 'sociedad gestora')
+          AND (c.texto CONTAINS 'autorización' OR c.texto CONTAINS 'requisito' OR c.texto CONTAINS 'acceso a la actividad')
+        RETURN a.numero, a.titulo, c.texto AS fragmento LIMIT 5
 
 Pregunta: ¿Qué artículos están en el Capítulo IV?
 Cypher: MATCH (a:Articulo)-[:PERTENECE_A]->(c:Capitulo)
@@ -179,14 +184,14 @@ Cypher: MATCH (a:Articulo)-[:REFERENCIA]->(b:Articulo)
         RETURN b.numero, b.titulo
 
 Pregunta: ¿Qué artículos tratan sobre capital mínimo?
-Cypher: MATCH (a:Articulo)
-        WHERE a.texto CONTAINS 'capital mínimo' OR a.texto CONTAINS 'capital minimo'
-        RETURN a.numero, a.titulo, a.texto LIMIT 3
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+        WHERE c.texto CONTAINS 'capital mínimo' OR c.texto CONTAINS 'capital minimo'
+        RETURN a.numero, a.titulo, c.texto AS fragmento LIMIT 3
 
 Pregunta: ¿Cuál es el patrimonio mínimo de un FCR?
-Cypher: MATCH (a:Articulo)
-        WHERE a.texto CONTAINS 'patrimonio' AND (a.texto CONTAINS 'FCR' OR a.texto CONTAINS 'fondo de capital')
-        RETURN a.numero, a.titulo, a.texto LIMIT 3
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+        WHERE c.texto CONTAINS 'patrimonio' AND (c.texto CONTAINS 'FCR' OR c.texto CONTAINS 'fondo de capital')
+        RETURN a.numero, a.titulo, c.texto AS fragmento LIMIT 3
 
 Pregunta: ¿Qué entidades menciona el artículo 48?
 Cypher: MATCH (a:Articulo)-[:MENCIONA]->(e:Entidad)
@@ -199,26 +204,26 @@ Cypher: MATCH (a:Articulo)
         RETURN a.numero, a.titulo, a.texto
 
 Pregunta: ¿Qué significan las siglas SCR, FCR, SICC y FICC y en qué artículo se definen?
-Cypher: MATCH (a:Articulo)
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
         WHERE a.titulo CONTAINS 'Definición'
            OR a.titulo CONTAINS 'Régimen jurídico'
            OR a.titulo CONTAINS 'SICC'
            OR a.titulo CONTAINS 'FICC'
-           OR a.texto CONTAINS 'SCR'
-           OR a.texto CONTAINS 'FCR'
-           OR a.texto CONTAINS 'SICC'
-           OR a.texto CONTAINS 'FICC'
-        RETURN a.numero, a.titulo, a.texto
+           OR c.texto CONTAINS 'SCR'
+           OR c.texto CONTAINS 'FCR'
+           OR c.texto CONTAINS 'SICC'
+           OR c.texto CONTAINS 'FICC'
+        RETURN a.numero, a.titulo, c.texto AS fragmento
         ORDER BY a.numero ASC
         LIMIT 5
 
 Pregunta: ¿Qué es una SGEIC y en qué artículo se define?
-Cypher: MATCH (a:Articulo)
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
         WHERE a.titulo CONTAINS 'sociedad gestora'
            OR a.titulo CONTAINS 'SGEIC'
            OR a.titulo CONTAINS 'Definición'
-           OR (a.texto CONTAINS 'SGEIC' AND a.titulo CONTAINS 'Requisitos')
-        RETURN a.numero, a.titulo, a.texto
+           OR (c.texto CONTAINS 'SGEIC' AND a.titulo CONTAINS 'Requisitos')
+        RETURN a.numero, a.titulo, c.texto AS fragmento
         ORDER BY a.numero ASC
         LIMIT 5
 
@@ -232,23 +237,23 @@ Cypher: MATCH (a:Articulo)
         LIMIT 5
 
 Pregunta: Diferencia entre ECR y EICC
-Cypher: MATCH (a:Articulo)
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
         WHERE a.titulo CONTAINS 'Entidades de capital-riesgo'
            OR a.titulo CONTAINS 'Entidades de inversión colectiva'
            OR a.titulo CONTAINS 'Definición y régimen jurídico'
            OR a.titulo CONTAINS 'Régimen jurídico'
-           OR a.texto CONTAINS 'ECR'
-           OR a.texto CONTAINS 'EICC'
-        RETURN a.numero, a.titulo, a.texto
+           OR c.texto CONTAINS 'ECR'
+           OR c.texto CONTAINS 'EICC'
+        RETURN a.numero, a.titulo, c.texto AS fragmento
         ORDER BY a.numero ASC
         LIMIT 6
 
 Pregunta: ¿Qué son las ECR? ¿Cuál es su objeto?
-Cypher: MATCH (a:Articulo)
+Cypher: MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
         WHERE a.titulo CONTAINS 'Objeto'
            OR a.titulo CONTAINS 'Definición'
-           OR (a.texto CONTAINS 'ECR' AND (a.titulo CONTAINS 'capital-riesgo' OR a.titulo CONTAINS 'Concepto'))
-        RETURN a.numero, a.titulo, a.texto
+           OR (c.texto CONTAINS 'ECR' AND (a.titulo CONTAINS 'capital-riesgo' OR a.titulo CONTAINS 'Concepto'))
+        RETURN a.numero, a.titulo, c.texto AS fragmento
         ORDER BY a.numero ASC
         LIMIT 5
 """
@@ -259,6 +264,7 @@ Tu tarea es generar consultas Cypher PRECISAS para recuperar los artículos más
 Esquema del grafo:
 - Nodos:
   - Articulo(id, numero, titulo, texto)
+  - Chunk(id, texto, orden, articulo_id, articulo_numero, articulo_titulo)
   - Titulo
   - Capitulo
   - Seccion
@@ -267,6 +273,7 @@ Esquema del grafo:
   - Disposicion
 - Relaciones:
   - PERTENECE_A
+  - TIENE_CHUNK
   - REFERENCIA
   - MENCIONA
   - TRATA_SOBRE
@@ -312,15 +319,15 @@ REGLAS OBLIGATORIAS:
    - usa ORDER BY a.numero ASC.
    - usa LIMIT 6 como máximo.
 
-4. La búsqueda por contenido en `a.texto CONTAINS ...` es útil, pero NO debe usarse como única estrategia si la pregunta es definicional.
+4. La búsqueda por contenido en `c.texto CONTAINS ...` es útil, pero NO debe usarse como única estrategia si la pregunta es definicional.
    - En preguntas definicionales, combina:
      - `a.titulo CONTAINS ...`
-     - `a.texto CONTAINS ...`
+     - `c.texto CONTAINS ...`
    - Prioriza artículos cuyo título sugiere definición o régimen básico.
 
 5. Para siglas o acrónimos (SCR, FCR, SICC, FICC, SGEIC, ECR, EICC, EICCP):
    - busca primero por `a.titulo CONTAINS 'sigla'`
-   - y en segundo lugar por `a.texto CONTAINS 'sigla'`
+   - y en segundo lugar por `c.texto CONTAINS 'sigla'`
    - si la pregunta pide significado o artículo definitorio, prioriza artículos de definición/régimen jurídico, no artículos donde solo se mencionan esas siglas.
 
 6. Para SGEIC, además de 'SGEIC', puedes usar 'sociedad gestora', pero evita recuperar artículos meramente operativos si la pregunta pide definición o requisitos de acceso.
@@ -339,7 +346,7 @@ REGLAS OBLIGATORIAS:
 
 8. Evita artículos de comercialización, supervisión o sanción cuando la pregunta sea definicional o estructural, salvo que la pregunta trate específicamente de comercialización, CNMV, notificación, registro o sanciones.
 
-9. Incluye SIEMPRE `a.texto` en el RETURN.
+9. Si recuperas por `Chunk`, incluye `c.texto` en el RETURN como `fragmento`. Si recuperas un artículo concreto por id, incluye `a.texto`.
 
 10. Usa siempre consultas limpias, sin comentarios ni markdown. Devuelve solo Cypher.
 
@@ -418,6 +425,41 @@ def _articulo_id(numero_normalizado: str) -> str:
     return f"art_{numero_normalizado}"
 
 
+def _score_chunk(chunk: dict) -> float:
+    try:
+        return float(chunk.get("score") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _ordenar_chunks(chunks: list[dict]) -> list[dict]:
+    return sorted(
+        chunks,
+        key=lambda c: (-_score_chunk(c), c.get("orden", 10**9), c.get("id", "")),
+    )
+
+
+def _merge_chunks(*listas_chunks: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for lista in listas_chunks:
+        for chunk in lista or []:
+            chunk_id = chunk.get("id")
+            if not chunk_id:
+                continue
+            previo = merged.get(chunk_id)
+            if previo is None or _score_chunk(chunk) > _score_chunk(previo):
+                merged[chunk_id] = dict(chunk)
+    return _ordenar_chunks(list(merged.values()))
+
+
+def _adjuntar_chunk_a_articulo(articulo: dict, chunk: dict | None) -> dict:
+    art = dict(articulo)
+    if chunk:
+        art["chunks_relevantes"] = _merge_chunks(art.get("chunks_relevantes", []), [chunk])
+        art["score"] = max(float(art.get("score") or 0.0), _score_chunk(chunk))
+    return art
+
+
 def _merge_articulos(*listas_articulos: list[dict]) -> list[dict]:
     """Une listas de artículos sin duplicados por id, priorizando el texto más largo."""
     merged: dict[str, dict] = {}
@@ -426,9 +468,26 @@ def _merge_articulos(*listas_articulos: list[dict]) -> list[dict]:
             art_id = art.get("id")
             if not art_id:
                 continue
+            actual = dict(art)
+            actual["chunks_relevantes"] = _merge_chunks(actual.get("chunks_relevantes", []))
+
             previo = merged.get(art_id)
-            if previo is None or len(str(art.get("texto", ""))) > len(str(previo.get("texto", ""))):
-                merged[art_id] = art
+            if previo is None:
+                merged[art_id] = actual
+                continue
+
+            base = dict(previo)
+            if len(str(actual.get("texto", ""))) > len(str(base.get("texto", ""))):
+                for key, value in base.items():
+                    actual.setdefault(key, value)
+                base = actual
+
+            base["chunks_relevantes"] = _merge_chunks(
+                previo.get("chunks_relevantes", []),
+                actual.get("chunks_relevantes", []),
+            )
+            base["score"] = max(float(previo.get("score") or 0.0), float(actual.get("score") or 0.0))
+            merged[art_id] = base
     return list(merged.values())
 
 
@@ -440,10 +499,11 @@ def _ordenar_articulos(articulos: list[dict], ids_prioritarios: list[str] | None
         art_id = art.get("id", "")
         if art_id in prioridad:
             return (0, prioridad[art_id], 0, art_id)
+        score = float(art.get("score") or 0.0)
         numero = str(art.get("numero", ""))
         m = re.match(r"(\d+)", numero)
         base = int(m.group(1)) if m else 10**9
-        return (1, base, numero, art_id)
+        return (1, -score, base, numero, art_id)
 
     return sorted(articulos, key=_key)
 
@@ -458,6 +518,65 @@ def _fetch_articulos_by_ids(driver, ids: list[str]) -> list[dict]:
         )
         articulos = [dict(record["a"]) for record in rows]
     return _ordenar_articulos(articulos, ids_prioritarios=ids)
+
+
+def _fetch_chunks_by_article_ids(driver, ids: list[str], limit_per_article: int | None = None) -> dict[str, list[dict]]:
+    if not ids:
+        return {}
+
+    with driver.session() as s:
+        rows = s.run(
+            """
+            MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+            WHERE a.id IN $ids
+            RETURN a.id AS articulo_id, c
+            ORDER BY a.id, c.orden ASC
+            """,
+            ids=ids,
+        ).data()
+
+    chunks_por_articulo: dict[str, list[dict]] = {}
+    for row in rows:
+        articulo_id = row.get("articulo_id")
+        chunk = dict(row.get("c"))
+        chunks_por_articulo.setdefault(articulo_id, []).append(chunk)
+
+    if limit_per_article is not None:
+        chunks_por_articulo = {
+            articulo_id: chunk_list[:limit_per_article]
+            for articulo_id, chunk_list in chunks_por_articulo.items()
+        }
+    return chunks_por_articulo
+
+
+def _adjuntar_chunks_articulos(driver, articulos: list[dict], limit_per_article: int | None = None) -> list[dict]:
+    ids = [art.get("id") for art in articulos if art.get("id")]
+    chunks_por_articulo = _fetch_chunks_by_article_ids(driver, ids, limit_per_article=limit_per_article)
+    enriched = []
+    for art in articulos:
+        art_copy = dict(art)
+        art_copy["chunks_relevantes"] = _merge_chunks(
+            art_copy.get("chunks_relevantes", []),
+            chunks_por_articulo.get(art_copy.get("id"), []),
+        )
+        enriched.append(art_copy)
+    return enriched
+
+
+def _row_to_articulo_con_chunk(row: dict) -> dict | None:
+    articulo = row.get("a") or row.get("articulo") or row.get("node")
+    if not articulo:
+        return None
+    art = dict(articulo)
+    chunk = row.get("c") or row.get("chunk")
+    if chunk:
+        chunk_dict = dict(chunk)
+        if row.get("score") is not None:
+            chunk_dict["score"] = row.get("score")
+        return _adjuntar_chunk_a_articulo(art, chunk_dict)
+    if row.get("score") is not None:
+        art["score"] = row.get("score")
+    return art
 
 
 def _expandir_subgrafo(driver, ids_base: list[str], verbose: bool = False) -> list[dict]:
@@ -516,12 +635,16 @@ def _recuperar_articulos_objetivo(query: str, expandir: bool = True, verbose: bo
     ids = [_articulo_id(n) for n in nums]
     driver = get_driver()
     try:
-        directos = _fetch_articulos_by_ids(driver, ids)
+        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids))
         if verbose:
             print(f"  [articulo directo] solicitados={ids}, encontrados={len(directos)}")
         if not expandir:
             return directos
-        vecinos = _expandir_subgrafo(driver, [a["id"] for a in directos] or ids, verbose=verbose)
+        vecinos = _adjuntar_chunks_articulos(
+            driver,
+            _expandir_subgrafo(driver, [a["id"] for a in directos] or ids, verbose=verbose),
+            limit_per_article=1,
+        )
         return _ordenar_articulos(_merge_articulos(directos, vecinos), ids_prioritarios=ids)
     finally:
         driver.close()
@@ -549,77 +672,94 @@ def _articulos_sin_cita(respuesta: str, articulos_objetivo: list[str]) -> list[s
 
 def buscar_articulos(driver, query: str, verbose: bool = False) -> list[dict]:
     """
-    Recupera artículos relevantes desde Neo4j usando múltiples estrategias:
+    Recupera artículos relevantes desde Neo4j usando chunks como unidad primaria:
       1. Números de artículo directos en la query
       2. Entidades mencionadas en la query
-      3. Búsqueda FULLTEXT por palabras clave de la query
+      3. Búsqueda FULLTEXT por palabras clave sobre Chunk
       4. Expansión: referencias + misma sección + mismo capítulo
     """
-    resultados = {}  # id -> dict
+    resultados: dict[str, dict] = {}
+
+    def _guardar_articulo(art: dict | None):
+        if not art or not art.get("id"):
+            return
+        previo = resultados.get(art["id"])
+        if previo is None:
+            resultados[art["id"]] = art
+        else:
+            resultados[art["id"]] = _merge_articulos([previo], [art])[0]
 
     numeros_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in numeros_objetivo]
+    entity_ids: set[str] = set()
 
     with driver.session() as s:
-
-        # -- Estrategia 1: artículo por número directo
         if numeros_objetivo and verbose:
             print(f"  [1] Artículos directos solicitados: {ids_objetivo}")
-        for art_id in ids_objetivo:
-            res = s.run("MATCH (a:Articulo {id: $id}) RETURN a", id=art_id)
-            for record in res:
-                a = dict(record["a"])
-                resultados[a["id"]] = a
+        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo))
+        for art in directos:
+            _guardar_articulo(art)
 
-        # -- Estrategia 2: por entidad mencionada en la query
         entidades = _extraer_entidades_query(query)
         if entidades and verbose:
             print(f"  [2] Entidades: {entidades}")
         for ent in entidades:
             res = s.run("""
                 MATCH (a:Articulo)-[:MENCIONA]->(e:Entidad {nombre: $nombre})
-                RETURN a LIMIT 15
+                RETURN a.id AS articulo_id LIMIT 15
             """, nombre=ent)
             for record in res:
-                a = dict(record["a"])
-                resultados[a["id"]] = a
+                if record.get("articulo_id"):
+                    entity_ids.add(record["articulo_id"])
 
-        # -- Estrategia 3: FULLTEXT sobre titulo + texto
         palabras = [p for p in re.split(r'\W+', query) if len(p) > 4]
         if palabras:
             lucene_query = " OR ".join(palabras[:6])
             if verbose:
-                print(f"  [3] Fulltext: {lucene_query}")
+                print(f"  [3] Fulltext sobre chunks: {lucene_query}")
             try:
                 res = s.run("""
-                    CALL db.index.fulltext.queryNodes('articulo_texto', $q)
+                    CALL db.index.fulltext.queryNodes('chunk_texto', $q)
                     YIELD node, score
+                    MATCH (a:Articulo)-[:TIENE_CHUNK]->(node)
                     WHERE score > 0.2
-                    RETURN node AS a ORDER BY score DESC LIMIT 15
+                    RETURN a, node AS c, score
+                    ORDER BY score DESC, c.orden ASC
+                    LIMIT 20
                 """, q=lucene_query)
                 for record in res:
-                    a = dict(record["a"])
-                    resultados[a["id"]] = a
+                    _guardar_articulo(_row_to_articulo_con_chunk(record))
             except Exception:
-                # Fallback si fulltext no está disponible: CONTAINS
                 for p in palabras[:5]:
                     res = s.run("""
-                        MATCH (a:Articulo)
-                        WHERE toLower(a.titulo) CONTAINS toLower($p)
-                           OR toLower(a.texto)  CONTAINS toLower($p)
-                        RETURN a LIMIT 8
+                        MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+                        WHERE toLower(c.texto) CONTAINS toLower($p)
+                        RETURN a, c, 0.0 AS score
+                        ORDER BY c.orden ASC
+                        LIMIT 10
                     """, p=p)
                     for record in res:
-                        a = dict(record["a"])
-                        resultados[a["id"]] = a
+                        _guardar_articulo(_row_to_articulo_con_chunk(record))
+
+        if entity_ids:
+            entity_articles = _adjuntar_chunks_articulos(
+                driver,
+                _fetch_articulos_by_ids(driver, list(entity_ids)),
+                limit_per_article=2,
+            )
+            for art in entity_articles:
+                _guardar_articulo(art)
 
         if verbose:
             print(f"  Recuperados inicialmente: {len(resultados)} artículos")
 
-    # -- Estrategia 4: expansión de subgrafo (referencias + sección + capítulo)
     ids_base = list(resultados.keys()) or ids_objetivo
     if ids_base:
-        expandidos = _expandir_subgrafo(driver, ids_base, verbose=verbose)
+        expandidos = _adjuntar_chunks_articulos(
+            driver,
+            _expandir_subgrafo(driver, ids_base, verbose=verbose),
+            limit_per_article=1,
+        )
         nuevos = 0
         for art in expandidos:
             art_id = art.get("id")
@@ -649,8 +789,22 @@ def construir_contexto(
         art_id = str(art.get("id", ""))
         numero_norm = str(art.get("numero", "")).lower().replace(" ", "_")
         incluir_completo = art_id in articulos_completos or numero_norm in articulos_completos
-        texto = art.get("texto", "") if incluir_completo else art.get("texto", "")[:8000]
-        bloque = header + "\n" + texto
+        if incluir_completo:
+            cuerpo = art.get("texto", "")
+        else:
+            fragmentos = _merge_chunks(art.get("chunks_relevantes", []))[:MAX_CHUNKS_POR_ARTICULO]
+            if fragmentos:
+                lineas = []
+                for idx, chunk in enumerate(fragmentos, 1):
+                    score = chunk.get("score")
+                    tag_score = f" | score={score:.3f}" if isinstance(score, (int, float)) else ""
+                    lineas.append(f"[fragmento {idx}{tag_score}]")
+                    lineas.append(chunk.get("texto", ""))
+                cuerpo = "\n\n".join(lineas)
+            else:
+                cuerpo = art.get("texto", "")[:4000]
+
+        bloque = header + "\n" + cuerpo
         if total + len(bloque) > max_chars and not incluir_completo:
             break
         partes.append(bloque)
@@ -733,9 +887,13 @@ def _validar_y_reforzar_citas(
     try:
         ids_directos = [a.get("id") for a in directos if a.get("id")]
         missing_ids = [art_id for art_id in ids_faltan if art_id not in ids_directos]
-        fetched = _fetch_articulos_by_ids(driver, missing_ids) if missing_ids else []
+        fetched = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, missing_ids)) if missing_ids else []
         semilla_expansion = list(ids_faltan) if missing_ids else ids_directos
-        expandidos = _expandir_subgrafo(driver, semilla_expansion, verbose=verbose or trace) if semilla_expansion else []
+        expandidos = _adjuntar_chunks_articulos(
+            driver,
+            _expandir_subgrafo(driver, semilla_expansion, verbose=verbose or trace),
+            limit_per_article=1,
+        ) if semilla_expansion else []
     finally:
         driver.close()
 
@@ -835,15 +993,23 @@ def _fallback_texto(query: str) -> str:
 
     driver = get_driver()
     resultados: dict[str, dict] = {}
+
+    def _guardar_articulo(art: dict | None):
+        if not art or not art.get("id"):
+            return
+        previo = resultados.get(art["id"])
+        if previo is None:
+            resultados[art["id"]] = art
+        else:
+            resultados[art["id"]] = _merge_articulos([previo], [art])[0]
+
     try:
         with driver.session() as s:
-            # Artículo directo cuando viene explícito en la pregunta.
             if ids_objetivo:
-                directos = _fetch_articulos_by_ids(driver, ids_objetivo)
+                directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo))
                 for art in directos:
-                    resultados[art["id"]] = art
+                    _guardar_articulo(art)
 
-            # Búsqueda prioritaria para preguntas definitorias: por título del artículo.
             if es_pregunta_definitoria:
                 titulos_def = [
                     "Objeto", "Naturaleza", "Formas", "Definición", "Concepto",
@@ -857,43 +1023,39 @@ def _fallback_texto(query: str) -> str:
                         kw=titulo_kw,
                     )
                     for r in rows:
-                        art = dict(r["a"])
-                        resultados[art["id"]] = art
+                        _guardar_articulo(dict(r["a"]))
 
                 for palabra in palabras[:4]:
                     rows = s.run(
-                        "MATCH (a:Articulo) WHERE toLower(a.texto) CONTAINS toLower($kw) "
+                        "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
+                        "WHERE toLower(c.texto) CONTAINS toLower($kw) "
                         "AND toInteger(split(a.numero, ' ')[0]) <= 15 "
-                        "RETURN a ORDER BY a.numero LIMIT 4",
+                        "RETURN a, c, 0.0 AS score ORDER BY a.numero, c.orden LIMIT 6",
                         kw=palabra,
                     )
                     for r in rows:
-                        art = dict(r["a"])
-                        resultados[art["id"]] = art
+                        _guardar_articulo(_row_to_articulo_con_chunk(r))
 
-            # Búsqueda específica por acrónimos.
             for acr in acronimos[:6]:
                 rows = s.run(
-                    "MATCH (a:Articulo) WHERE a.titulo CONTAINS $kw OR a.texto CONTAINS $kw "
-                    "RETURN a ORDER BY a.numero LIMIT 4",
+                    "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
+                    "WHERE a.titulo CONTAINS $kw OR c.texto CONTAINS $kw "
+                    "RETURN a, c, 0.0 AS score ORDER BY a.numero, c.orden LIMIT 6",
                     kw=acr,
                 )
                 for r in rows:
-                    art = dict(r["a"])
-                    resultados[art["id"]] = art
+                    _guardar_articulo(_row_to_articulo_con_chunk(r))
 
-            # Búsqueda por palabras clave.
             for palabra in palabras[:5]:
                 rows = s.run(
-                    "MATCH (a:Articulo) WHERE toLower(a.texto) CONTAINS toLower($kw) "
-                    "RETURN a LIMIT 4",
+                    "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
+                    "WHERE toLower(c.texto) CONTAINS toLower($kw) "
+                    "RETURN a, c, 0.0 AS score LIMIT 6",
                     kw=palabra,
                 )
                 for r in rows:
-                    art = dict(r["a"])
-                    resultados[art["id"]] = art
+                    _guardar_articulo(_row_to_articulo_con_chunk(r))
 
-            # Si pide cantidades, priorizar artículos con importes.
             pide_cantidad = any(
                 w in query.lower()
                 for w in ["minimo", "mínimo", "cuanto", "cuánto", "importe", "cifra", "cantidad", "euros", "presupuesto"]
@@ -901,23 +1063,42 @@ def _fallback_texto(query: str) -> str:
             if pide_cantidad:
                 for palabra in palabras[:4]:
                     rows = s.run(
-                        "MATCH (a:Articulo) WHERE toLower(a.texto) CONTAINS toLower($kw) "
-                        "AND a.texto CONTAINS 'euros' "
-                        "RETURN a LIMIT 4",
+                        "MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk) "
+                        "WHERE toLower(c.texto) CONTAINS toLower($kw) "
+                        "AND c.texto CONTAINS 'euros' "
+                        "RETURN a, c, 0.0 AS score LIMIT 6",
                         kw=palabra,
                     )
                     for r in rows:
-                        art = dict(r["a"])
-                        resultados[art["id"]] = art
+                        _guardar_articulo(_row_to_articulo_con_chunk(r))
 
         ids_semilla = list(resultados.keys()) or ids_objetivo
         if ids_semilla:
-            for art in _expandir_subgrafo(driver, ids_semilla, verbose=False):
-                resultados[art["id"]] = art
+            expandidos = _adjuntar_chunks_articulos(
+                driver,
+                _expandir_subgrafo(driver, ids_semilla, verbose=False),
+                limit_per_article=1,
+            )
+            for art in expandidos:
+                _guardar_articulo(art)
     finally:
         driver.close()
 
-    articulos = _ordenar_articulos(list(resultados.values()), ids_prioritarios=ids_objetivo)[:MAX_ARTICULOS_CONTEXTO]
+    if resultados:
+        articulos_base = list(resultados.values())
+        driver_extra = get_driver()
+        try:
+            articulos = _adjuntar_chunks_articulos(
+                driver=driver_extra,
+                articulos=articulos_base,
+                limit_per_article=MAX_CHUNKS_POR_ARTICULO,
+            )
+        finally:
+            driver_extra.close()
+    else:
+        articulos = []
+
+    articulos = _ordenar_articulos(articulos, ids_prioritarios=ids_objetivo)[:MAX_ARTICULOS_CONTEXTO]
     if not articulos and not contexto_acronimos:
         return ""
 
@@ -1175,7 +1356,7 @@ _VECTOR_INDEX_AVAILABLE: bool | None = None
 
 
 def _has_vector_index(driver) -> bool:
-    """Comprueba si el índice vectorial `articulo_vector` existe en Neo4j."""
+    """Comprueba si el índice vectorial `chunk_vector` existe en Neo4j."""
     global _VECTOR_INDEX_AVAILABLE
     if _VECTOR_INDEX_AVAILABLE is not None:
         return _VECTOR_INDEX_AVAILABLE
@@ -1185,7 +1366,7 @@ def _has_vector_index(driver) -> bool:
             res = s.run("SHOW INDEXES")
             for r in res:
                 info = r.data()
-                if info.get("name") == "articulo_vector":
+                if info.get("name") == "chunk_vector":
                     _VECTOR_INDEX_AVAILABLE = True
                     return True
     except Exception:
@@ -1196,7 +1377,7 @@ def _has_vector_index(driver) -> bool:
 
 
 def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
-    """Recuperación semántica con embeddings (vector search en Neo4j)."""
+    """Recuperación semántica con embeddings a nivel Chunk."""
     articulos_objetivo = _extraer_numeros_articulo(query)
     ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
 
@@ -1214,29 +1395,27 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
         norm_b = math.sqrt(sum(y * y for y in b))
         return dot / (norm_a * norm_b) if norm_a > 0 and norm_b > 0 else 0.0
 
-    def _vector_search_fallback(driver, query_vector, top_k=MAX_ARTICULOS_CONTEXTO):
-        """Busca en Neo4j cargando embeddings y ordenando por similitud en Python."""
+    def _vector_search_fallback(driver, query_vector, top_k=MAX_CHUNKS_RELEVANTES):
+        """Busca en Neo4j cargando embeddings de chunks y ordenando por similitud en Python."""
         rows = driver.session().run(
-            "MATCH (a:Articulo) WHERE a.embedding IS NOT NULL AND size(a.embedding) > 0 RETURN a",
+            """
+            MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+            WHERE c.embedding IS NOT NULL AND size(c.embedding) > 0
+            RETURN a, c
+            """
         ).data()
         candidates = []
         for r in rows:
-            node = r["a"]
-            emb = node.get("embedding") or []
+            chunk = r["c"]
+            emb = chunk.get("embedding") or []
             if not emb:
                 continue
             score = _cosine_similarity(query_vector, emb)
-            candidates.append((score, node))
+            candidates.append((score, r["a"], chunk))
         candidates.sort(key=lambda x: x[0], reverse=True)
         results = []
-        for score, node in candidates[:top_k]:
-            results.append({
-                "id": node.get("id"),
-                "numero": node.get("numero"),
-                "titulo": node.get("titulo"),
-                "texto": node.get("texto"),
-                "score": score,
-            })
+        for score, articulo, chunk in candidates[:top_k]:
+            results.append(_row_to_articulo_con_chunk({"a": articulo, "c": chunk, "score": score}))
         return results
 
     emb = _get_emb(EMBED_MODEL)
@@ -1250,54 +1429,66 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
     vector = emb.embed_query(query)
 
     driver = get_driver()
-    articulos = []
+    resultados: dict[str, dict] = {}
+
+    def _guardar_articulo(art: dict | None):
+        if not art or not art.get("id"):
+            return
+        previo = resultados.get(art["id"])
+        if previo is None:
+            resultados[art["id"]] = art
+        else:
+            resultados[art["id"]] = _merge_articulos([previo], [art])[0]
+
     with driver.session() as s:
         if USE_VECTOR_INDEX and _has_vector_index(driver):
             try:
                 rows = s.run(
-                    "CALL db.index.vector.queryNodes('articulo_vector', $k, $vector) "
+                    "CALL db.index.vector.queryNodes('chunk_vector', $k, $vector) "
                     "YIELD node, score "
-                    "RETURN node, score ORDER BY score DESC LIMIT $k",
+                    "MATCH (a:Articulo)-[:TIENE_CHUNK]->(node) "
+                    "RETURN a, node AS c, score ORDER BY score DESC, c.orden ASC LIMIT $k",
                     vector=vector,
-                    k=MAX_ARTICULOS_CONTEXTO,
+                    k=MAX_CHUNKS_RELEVANTES,
                 ).data()
                 for r in rows:
-                    node = r["node"]
-                    articulos.append({
-                        "id": node.get("id"),
-                        "numero": node.get("numero"),
-                        "titulo": node.get("titulo"),
-                        "texto": node.get("texto"),
-                        "score": r.get("score"),
-                    })
+                    _guardar_articulo(_row_to_articulo_con_chunk(r))
 
-                # Si la búsqueda vectorial no produce suficientes resultados, hacer una
-                # búsqueda de respaldo por texto para aumentar la cobertura.
-                if len(articulos) < 4 or (articulos and max(a.get("score", 0) or 0 for a in articulos) < 0.35):
+                articulos_semilla = list(resultados.values())
+                if len(articulos_semilla) < 4 or (
+                    articulos_semilla
+                    and max(float(a.get("score", 0) or 0) for a in articulos_semilla) < 0.35
+                ):
                     if verbose:
                         print("[vector] Resultados limitados; complemento con busqueda por texto...")
-                    pivot_ids = {a["id"] for a in articulos}
+                    pivot_ids = {a["id"] for a in articulos_semilla}
                     texto_fallback = buscar_articulos(driver, query, verbose=verbose)
                     for a in texto_fallback:
                         if a["id"] not in pivot_ids:
-                            articulos.append(a)
+                            _guardar_articulo(a)
             except Exception as e:
                 if verbose or trace:
                     print(f"[vector] Error ejecutando vector search en Neo4j: {e}")
-                articulos = _vector_search_fallback(driver, vector)
+                for art in _vector_search_fallback(driver, vector):
+                    _guardar_articulo(art)
         else:
             if verbose or trace:
                 if not USE_VECTOR_INDEX:
                     print("[vector] Vector index deshabilitado via config (USE_VECTOR_INDEX=False). Usando fallback local (cosine similarity).")
                 else:
                     print("[vector] No hay indice vectorial disponible; usando fallback local (cosine similarity).")
-            articulos = _vector_search_fallback(driver, vector)
+            for art in _vector_search_fallback(driver, vector):
+                _guardar_articulo(art)
 
-        directos = _fetch_articulos_by_ids(driver, ids_objetivo) if ids_objetivo else []
-        ids_semilla = list(dict.fromkeys(ids_objetivo + [a.get("id") for a in articulos if a.get("id")]))
-        expandidos = _expandir_subgrafo(driver, ids_semilla, verbose=verbose or trace) if ids_semilla else []
+        directos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_objetivo)) if ids_objetivo else []
+        ids_semilla = list(dict.fromkeys(ids_objetivo + [a.get("id") for a in resultados.values() if a.get("id")]))
+        expandidos = _adjuntar_chunks_articulos(
+            driver,
+            _expandir_subgrafo(driver, ids_semilla, verbose=verbose or trace),
+            limit_per_article=1,
+        ) if ids_semilla else []
         articulos = _ordenar_articulos(
-            _merge_articulos(directos, articulos, expandidos),
+            _merge_articulos(directos, list(resultados.values()), expandidos),
             ids_prioritarios=ids_objetivo,
         )[:MAX_ARTICULOS_CONTEXTO]
 

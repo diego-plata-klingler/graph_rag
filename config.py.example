@@ -35,6 +35,10 @@ PDF_PATH        = "ruta/al/documento.pdf"
 DATA_DIR        = "data"
 ARTICULOS_JSON  = f"{DATA_DIR}/articulos.json"
 
+# Chunking estructurado inspirado en rag_engine
+CHUNK_MAX_TOKENS = 350
+CHUNK_OVERLAP    = 60
+
 # ──────────────────────────────────────────────
 # Opciones de construcción del grafo
 # ──────────────────────────────────────────────
