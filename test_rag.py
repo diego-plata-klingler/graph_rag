@@ -1,66 +1,93 @@
-import subprocess
+import argparse
 import json
-import os
+import subprocess
 import sys
+from pathlib import Path
 
-from openai import OpenAI
-
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import OPENAI_API_KEY
 
-# ==============================
-# CONFIG
-# ==============================
 
-PYTHON_PATH = r"C:/Users/plata/Desktop/graph_rag/rag_grafos/.venv/Scripts/python.exe"
-SCRIPT_PATH = "03_consultar.py"
+BASE_DIR = Path(__file__).resolve().parent
+PYTHON_PATH = sys.executable
+SCRIPT_PATH = BASE_DIR / "03_consultar.py"
 
-PREGUNTAS_FILE = "preguntas.txt"
-RESULTADOS_FILE = "evaluaciones.jsonl"
-RESUMEN_FILE = "resumen.txt"
-QA_FILE = "preguntas_respuestas.txt"
+PREGUNTAS_FILE = BASE_DIR / "preguntas.txt"
+RESULTADOS_FILE = BASE_DIR / "evaluaciones.jsonl"
+RESUMEN_FILE = BASE_DIR / "resumen.txt"
+QA_FILE = BASE_DIR / "preguntas_respuestas.txt"
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+DEFAULT_MODO = "grafo"
+DEFAULT_MAX_PREGUNTAS = 30
 
-# ==============================
-# FUNCIONES
-# ==============================
+_client = None
+
 
 def extraer_respuesta_final(stdout: str) -> str:
-    """
-    Extrae solo el bloque de texto posterior a 'RESPUESTA:'.
-    Si no existe, devuelve stdout completo.
-    """
+    """Extrae solo el bloque de texto posterior a 'RESPUESTA:'."""
     marker = "RESPUESTA:"
     if marker in stdout:
         return stdout.split(marker, 1)[1].strip()
     return stdout.strip()
 
 
-def ejecutar_query(query: str):
+def cargar_preguntas(path: Path, max_preguntas: int | None = DEFAULT_MAX_PREGUNTAS) -> list[str]:
+    """Carga preguntas y recompone líneas partidas del fichero."""
+    raw_lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    preguntas: list[str] = []
+
+    for line in raw_lines:
+        if line.startswith("¿"):
+            preguntas.append(line)
+            continue
+
+        idx_pendiente = next(
+            (idx for idx in range(len(preguntas) - 1, -1, -1) if not preguntas[idx].endswith("?")),
+            None,
+        )
+
+        if idx_pendiente is None:
+            if preguntas:
+                preguntas[-1] = f"{preguntas[-1]} {line}".strip()
+            else:
+                preguntas.append(line)
+            continue
+
+        joiner = "" if line and line[0].islower() else " "
+        preguntas[idx_pendiente] = f"{preguntas[idx_pendiente]}{joiner}{line}".strip()
+
+    if max_preguntas is not None:
+        return preguntas[:max_preguntas]
+    return preguntas
+
+
+def ejecutar_query(query: str, modo: str, verbose_consulta: bool = False) -> dict:
     cmd = [
         PYTHON_PATH,
-        SCRIPT_PATH,
+        str(SCRIPT_PATH),
         "--modo",
-        "vector",
+        modo,
         "--query",
         query,
-        "--verbose"
     ]
+    if verbose_consulta:
+        cmd.append("--verbose")
 
     result = subprocess.run(
         cmd,
+        cwd=str(BASE_DIR),
         capture_output=True,
         text=True,
-        encoding="utf-8"
+        encoding="utf-8",
+        errors="replace",
     )
 
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
-
     respuesta_final = extraer_respuesta_final(stdout)
 
     return {
+        "cmd": cmd,
         "stdout_completo": stdout,
         "stderr": stderr,
         "respuesta_final": respuesta_final,
@@ -68,14 +95,22 @@ def ejecutar_query(query: str):
     }
 
 
-def evaluar_respuesta(query: str, respuesta: str):
-    """
-    Evalúa con un criterio tolerante para RAG jurídico en desarrollo:
-    - correcta
-    - parcialmente_correcta
-    - incorrecta
-    """
+def get_client():
+    global _client
+    if _client is not None:
+        return _client
 
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("No se pudo importar 'openai' para evaluar respuestas.") from exc
+
+    _client = OpenAI(api_key=OPENAI_API_KEY)
+    return _client
+
+
+def evaluar_respuesta(query: str, respuesta: str) -> dict:
+    """Evalúa con un criterio tolerante para RAG jurídico en desarrollo."""
     prompt = f"""
 Eres un evaluador de un sistema RAG jurídico EN DESARROLLO.
 
@@ -140,7 +175,7 @@ Formato exacto:
 }}
 """
 
-    completion = client.chat.completions.create(
+    completion = get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {
@@ -181,35 +216,58 @@ def valor_clasificacion(clasificacion: str) -> float:
         "correcta": 1.0,
         "parcialmente_correcta": 0.5,
         "incorrecta": 0.0,
+        "no_evaluada": 0.0,
     }
     return mapping.get(clasificacion, 0.0)
 
 
-# ==============================
-# MAIN
-# ==============================
-
 def main():
-    with open(PREGUNTAS_FILE, "r", encoding="utf-8") as f:
-        preguntas = [p.strip() for p in f if p.strip()]
+    parser = argparse.ArgumentParser(description="Ejecuta una batería de preguntas contra 03_consultar.py")
+    parser.add_argument("--modo", choices=["cypher", "grafo", "vector"], default=DEFAULT_MODO)
+    parser.add_argument("--max-preguntas", type=int, default=DEFAULT_MAX_PREGUNTAS)
+    parser.add_argument("--verbose-consulta", action="store_true", help="Pasa --verbose a 03_consultar.py")
+    parser.add_argument("--sin-evaluacion", action="store_true", help="Ejecuta las preguntas sin llamar al evaluador")
+    args = parser.parse_args()
+
+    preguntas = cargar_preguntas(PREGUNTAS_FILE, max_preguntas=args.max_preguntas)
+    total_preguntas = len(preguntas)
 
     correctas = 0
     parciales = 0
     incorrectas = 0
+    no_evaluadas = 0
     total = 0
     suma_scores = 0.0
     suma_precision_ponderada = 0.0
+    resultados_qa: list[tuple[str, str]] = []
 
-    resultados_qa = []
+    print(f"Modo de consulta: {args.modo}")
+    print(f"Python usado: {PYTHON_PATH}")
+    print(f"Preguntas a ejecutar: {total_preguntas}")
 
-    with open(RESULTADOS_FILE, "w", encoding="utf-8") as out:
-        for pregunta in preguntas:
-            print(f"\nPregunta: {pregunta}")
+    with RESULTADOS_FILE.open("w", encoding="utf-8") as out:
+        for idx, pregunta in enumerate(preguntas, start=1):
+            print(f"\n[{idx}/{total_preguntas}] Pregunta: {pregunta}")
 
-            ejecucion = ejecutar_query(pregunta)
+            ejecucion = ejecutar_query(pregunta, modo=args.modo, verbose_consulta=args.verbose_consulta)
             respuesta = ejecucion["respuesta_final"]
-
-            evaluacion = evaluar_respuesta(pregunta, respuesta)
+            if args.sin_evaluacion:
+                evaluacion = {
+                    "clasificacion": "no_evaluada",
+                    "score": 0,
+                    "explicacion": "Evaluación omitida por parámetro",
+                    "fallos": [],
+                }
+            else:
+                try:
+                    evaluacion = evaluar_respuesta(pregunta, respuesta)
+                except Exception as exc:
+                    evaluacion = {
+                        "clasificacion": "no_evaluada",
+                        "score": 0,
+                        "explicacion": f"No se pudo evaluar: {exc}",
+                        "fallos": ["evaluacion_no_disponible"],
+                    }
 
             clasificacion = evaluacion.get("clasificacion", "incorrecta")
             score = float(evaluacion.get("score", 0))
@@ -220,13 +278,12 @@ def main():
                 "stdout_completo": ejecucion["stdout_completo"],
                 "stderr": ejecucion["stderr"],
                 "returncode": ejecucion["returncode"],
+                "cmd": ejecucion["cmd"],
                 "evaluacion": evaluacion,
             }
-
             out.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
             resultados_qa.append((pregunta, respuesta))
-
             total += 1
             suma_scores += score
             suma_precision_ponderada += valor_clasificacion(clasificacion)
@@ -235,9 +292,13 @@ def main():
                 correctas += 1
             elif clasificacion == "parcialmente_correcta":
                 parciales += 1
+            elif clasificacion == "no_evaluada":
+                no_evaluadas += 1
             else:
                 incorrectas += 1
 
+            if ejecucion["returncode"] != 0:
+                print(f"Return code: {ejecucion['returncode']}")
             print("Clasificación:", clasificacion)
             print("Score:", score)
             print("Explicación:", evaluacion.get("explicacion", ""))
@@ -246,17 +307,17 @@ def main():
     precision_ponderada = suma_precision_ponderada / total if total else 0.0
     media_score = suma_scores / total if total else 0.0
 
-    with open(RESUMEN_FILE, "w", encoding="utf-8") as f:
+    with RESUMEN_FILE.open("w", encoding="utf-8") as f:
         f.write(f"Total preguntas: {total}\n")
         f.write(f"Correctas: {correctas}\n")
         f.write(f"Parcialmente correctas: {parciales}\n")
         f.write(f"Incorrectas: {incorrectas}\n")
+        f.write(f"No evaluadas: {no_evaluadas}\n")
         f.write(f"Precisión binaria: {precision_binaria:.2f}\n")
         f.write(f"Precisión ponderada: {precision_ponderada:.2f}\n")
         f.write(f"Score medio: {media_score:.2f}\n")
 
-    # Generar fichero legible pregunta/respuesta
-    with open(QA_FILE, "w", encoding="utf-8") as qa:
+    with QA_FILE.open("w", encoding="utf-8") as qa:
         for i, (pregunta, respuesta) in enumerate(resultados_qa):
             if i > 0:
                 qa.write("\n")
@@ -268,10 +329,11 @@ def main():
     print("Correctas:", correctas)
     print("Parcialmente correctas:", parciales)
     print("Incorrectas:", incorrectas)
+    print("No evaluadas:", no_evaluadas)
     print("Precisión binaria:", round(precision_binaria, 2))
     print("Precisión ponderada:", round(precision_ponderada, 2))
     print("Score medio:", round(media_score, 2))
-    print(f"\nFichero pregunta/respuesta guardado en: {QA_FILE}")
+    print(f"\nFichero pregunta/respuesta guardado en: {QA_FILE.name}")
 
 
 if __name__ == "__main__":
