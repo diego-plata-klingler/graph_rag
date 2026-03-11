@@ -1,0 +1,27 @@
+# Credenciales y configuración local
+config.py
+
+# Entornos virtuales
+.venv/
+.venv_linux/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Datos intermedios
+data/
+
+# Resultados de evaluación
+evaluaciones.jsonl
+resumen.txt
+preguntas_respuestas.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
