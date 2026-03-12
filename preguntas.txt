@@ -1,35 +1,30 @@
-¿Qué regula el objeto de la Ley 22/2014?
-¿Qué diferencia existe entre inversión colectiva de tipo abierto y de tipo cerrado?
-¿Qué requisitos deben cumplir las desinversiones para considerarse inversión colectiva de tipo cerrado?
-¿Qué es una entidad de inversión colectiva de tipo cerrado (EICC)?
-¿Qué forma jurídica pueden adoptar las EICC?
-¿Qué es una sociedad de capital riesgo (SCR)?
-¿Qué es un fondo de capital riesgo (FCR)?
-¿Qué significa EICCP en la Ley 22/2014?
-¿Cuál es el objeto principal de las entidades de capital-riesgo?
-¿Qué tipo de empresas pueden ser objeto de inversión por parte de una ECR?
-¿Pueden las ECR invertir en empresas financieras?
-¿Qué tipo de financiación pueden conceder las ECR a las empresas participadas?
-¿Qué actividades de asesoramiento pueden realizar las ECR?
-¿Qué instrumentos financieros pueden utilizar las ECR para invertir?
-¿Qué porcentaje mínimo del activo debe cumplir el coeficiente obligatorio de inversión de una ECR?
-¿Qué activos computan para el coeficiente obligatorio de inversión?
-¿Qué ocurre si una ECR incumple temporalmente el coeficiente de inversión?
-¿Qué limitaciones existen respecto a la concentración de inversiones en una misma empresa?
-¿Qué limitaciones existen respecto a inversiones en empresas del mismo grupo?
-¿Qué caracteriza a una ECR-Pyme frente a una ECR ordinaria?
-¿Qué porcentaje del activo deben invertir las ECR-Pyme en empresas objetivo?
-¿Qué requisitos deben cumplir las empresas en las que invierten las ECR-Pyme?
-¿Pueden las ECR-Pyme invertir en empresas cotizadas?
-¿Cuál es el objeto social de una SGEIC?
+¿Qué regula la Ley 22/2014 según su objeto?
+¿Qué se entiende por inversión colectiva de tipo cerrado y qué condiciones deben cumplir las desinversiones?
+¿Qué son las entidades de capital-riesgo y cuál es su actividad principal?
+¿Qué diferencia existe entre una sociedad de capital riesgo y un fondo de capital riesgo?
+¿Qué formas jurídicas pueden adoptar las entidades de capital-riesgo?
+¿Qué significa EICCP dentro de la Ley 22/2014?
+¿Qué entidades quedan expresamente excluidas del ámbito de aplicación de la ley?
+¿Cuál es la relación entre el objeto principal de las entidades de capital-riesgo y el porcentaje mínimo de inversión que deben mantener?
+¿Qué actividades complementarias pueden realizar las entidades de capital-riesgo además de su actividad principal?
+¿Qué tipo de financiación pueden conceder las entidades de capital-riesgo a las empresas participadas?
+¿Qué instrumentos financieros pueden computar dentro del coeficiente obligatorio de inversión de una ECR?
+¿Qué porcentaje mínimo del activo deben mantener las ECR en inversiones que cumplan su coeficiente obligatorio?
+¿Qué ocurre si una ECR incumple temporalmente el coeficiente obligatorio de inversión?
+¿Cómo se combinan las normas sobre diversificación de inversiones con el coeficiente obligatorio de inversión en las ECR?
+¿Qué límites existen para invertir en una misma empresa y en empresas del mismo grupo?
+¿En qué se diferencian las limitaciones de inversión de las ECR respecto de las ECR-Pyme?
+¿Qué caracteriza a una ECR-Pyme en comparación con una ECR ordinaria?
+¿Qué porcentaje del activo deben invertir las ECR-Pyme en empresas objetivo y qué requisitos deben cumplir esas empresas?
+¿Qué condiciones deben cumplir las empresas en las que invierten las ECR-Pyme?
+¿Pueden las ECR invertir en empresas cotizadas y en qué condiciones?
+¿Cómo se relacionan las reglas sobre empresas cotizadas con el coeficiente obligatorio de inversión?
+¿Qué funciones debe realizar una SGEIC en relación con la gestión de las entidades que administra?
+¿Qué relación existe entre la gestión de riesgos de una SGEIC y las obligaciones de información a los inversores?
 ¿Qué tipo de entidades puede gestionar una SGEIC?
-¿Puede una SCR actuar como su propia gestora?
-¿Qué funciones debe realizar una SGEIC respecto a la gestión de riesgos?
-¿Qué ocurre si una SGEIC no puede garantizar el cumplimiento de la ley por la entidad que gestiona?
-¿Qué información deben proporcionar las SGEIC a los inversores antes de la inversión?
-¿Qué información deben proporcionar periódicamente las SGEIC a los inversores?
-¿Qué información debe incluir el folleto de una ECR o EICC?
-¿Qué papel tiene la CNMV en la supervisión de las entidades reguladas por la Ley 22/2014?
-¿Qué ocurre si una entidad incumple las obligaciones establecidas en la ley?
-¿Qué relación existe entre la actividad principal de una ECR y el coeficiente obligatorio de inversión que debe cumplir?
-¿Qué diferencias existen entre la regulación aplicable a una ECR y a una EICC en cuanto a su objeto y actividad?
+¿Puede una SCR actuar como su propia sociedad gestora y bajo qué condiciones?
+¿Qué información deben proporcionar las SGEIC a los inversores antes de que realicen una inversión?
+¿Qué información deben comunicar periódicamente las SGEIC a los inversores?
+¿Qué papel desempeña la Comisión Nacional del Mercado de Valores en la supervisión de estas entidades?
+¿Qué consecuencias puede tener el incumplimiento de las obligaciones establecidas en la ley?
+¿Qué diferencias existen entre las entidades de inversión colectiva de tipo cerrado y las entidades de capital-riesgo en cuanto a su objeto y forma de inversión?

@@ -17,6 +17,7 @@ RESULTADOS_FILE = BASE_DIR / "evaluaciones.jsonl"
 RESUMEN_FILE = BASE_DIR / "resumen.txt"
 QA_FILE = BASE_DIR / "preguntas_respuestas.txt"
 
+MODOS_DISPONIBLES = ("cypher", "grafo", "vector")
 DEFAULT_MODO = "grafo"
 DEFAULT_MAX_PREGUNTAS = 30
 
@@ -221,9 +222,66 @@ def valor_clasificacion(clasificacion: str) -> float:
     return mapping.get(clasificacion, 0.0)
 
 
+def inicializar_metricas() -> dict[str, float]:
+    return {
+        "correctas": 0,
+        "parciales": 0,
+        "incorrectas": 0,
+        "no_evaluadas": 0,
+        "total": 0,
+        "suma_scores": 0.0,
+        "suma_precision_ponderada": 0.0,
+    }
+
+
+def actualizar_metricas(metricas: dict[str, float], clasificacion: str, score: float) -> None:
+    metricas["total"] += 1
+    metricas["suma_scores"] += score
+    metricas["suma_precision_ponderada"] += valor_clasificacion(clasificacion)
+
+    if clasificacion == "correcta":
+        metricas["correctas"] += 1
+    elif clasificacion == "parcialmente_correcta":
+        metricas["parciales"] += 1
+    elif clasificacion == "no_evaluada":
+        metricas["no_evaluadas"] += 1
+    else:
+        metricas["incorrectas"] += 1
+
+
+def calcular_resumen(metricas: dict[str, float]) -> dict[str, float]:
+    total = int(metricas["total"])
+    precision_binaria = metricas["correctas"] / total if total else 0.0
+    precision_ponderada = metricas["suma_precision_ponderada"] / total if total else 0.0
+    media_score = metricas["suma_scores"] / total if total else 0.0
+    return {
+        "total": total,
+        "correctas": int(metricas["correctas"]),
+        "parciales": int(metricas["parciales"]),
+        "incorrectas": int(metricas["incorrectas"]),
+        "no_evaluadas": int(metricas["no_evaluadas"]),
+        "precision_binaria": precision_binaria,
+        "precision_ponderada": precision_ponderada,
+        "media_score": media_score,
+    }
+
+
+def escribir_resumen(f, titulo: str, resumen: dict[str, float], include_header: bool = True) -> None:
+    if include_header:
+        f.write(f"[{titulo}]\n")
+    f.write(f"Total preguntas: {resumen['total']}\n")
+    f.write(f"Correctas: {resumen['correctas']}\n")
+    f.write(f"Parcialmente correctas: {resumen['parciales']}\n")
+    f.write(f"Incorrectas: {resumen['incorrectas']}\n")
+    f.write(f"No evaluadas: {resumen['no_evaluadas']}\n")
+    f.write(f"Precisión binaria: {resumen['precision_binaria']:.2f}\n")
+    f.write(f"Precisión ponderada: {resumen['precision_ponderada']:.2f}\n")
+    f.write(f"Score medio: {resumen['media_score']:.2f}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ejecuta una batería de preguntas contra 03_consultar.py")
-    parser.add_argument("--modo", choices=["cypher", "grafo", "vector"], default=DEFAULT_MODO)
+    parser.add_argument("--modo", choices=[*MODOS_DISPONIBLES, "todos"], default=DEFAULT_MODO)
     parser.add_argument("--max-preguntas", type=int, default=DEFAULT_MAX_PREGUNTAS)
     parser.add_argument("--verbose-consulta", action="store_true", help="Pasa --verbose a 03_consultar.py")
     parser.add_argument("--sin-evaluacion", action="store_true", help="Ejecuta las preguntas sin llamar al evaluador")
@@ -232,16 +290,11 @@ def main():
     preguntas = cargar_preguntas(PREGUNTAS_FILE, max_preguntas=args.max_preguntas)
     total_preguntas = len(preguntas)
 
-    correctas = 0
-    parciales = 0
-    incorrectas = 0
-    no_evaluadas = 0
-    total = 0
-    suma_scores = 0.0
-    suma_precision_ponderada = 0.0
-    resultados_qa: list[tuple[str, str]] = []
+    modos = list(MODOS_DISPONIBLES) if args.modo == "todos" else [args.modo]
+    metricas_por_modo = {modo: inicializar_metricas() for modo in modos}
+    resultados_qa: list[dict[str, object]] = []
 
-    print(f"Modo de consulta: {args.modo}")
+    print(f"Modos de consulta: {', '.join(modos)}")
     print(f"Python usado: {PYTHON_PATH}")
     print(f"Preguntas a ejecutar: {total_preguntas}")
 
@@ -249,90 +302,96 @@ def main():
         for idx, pregunta in enumerate(preguntas, start=1):
             print(f"\n[{idx}/{total_preguntas}] Pregunta: {pregunta}")
 
-            ejecucion = ejecutar_query(pregunta, modo=args.modo, verbose_consulta=args.verbose_consulta)
-            respuesta = ejecucion["respuesta_final"]
-            if args.sin_evaluacion:
-                evaluacion = {
-                    "clasificacion": "no_evaluada",
-                    "score": 0,
-                    "explicacion": "Evaluación omitida por parámetro",
-                    "fallos": [],
-                }
-            else:
-                try:
-                    evaluacion = evaluar_respuesta(pregunta, respuesta)
-                except Exception as exc:
+            respuestas_por_modo: dict[str, str] = {}
+            for modo in modos:
+                print(f"  -> Ejecutando modo {modo}")
+                ejecucion = ejecutar_query(pregunta, modo=modo, verbose_consulta=args.verbose_consulta)
+                respuesta = ejecucion["respuesta_final"]
+                if args.sin_evaluacion:
                     evaluacion = {
                         "clasificacion": "no_evaluada",
                         "score": 0,
-                        "explicacion": f"No se pudo evaluar: {exc}",
-                        "fallos": ["evaluacion_no_disponible"],
+                        "explicacion": "Evaluación omitida por parámetro",
+                        "fallos": [],
                     }
+                else:
+                    try:
+                        evaluacion = evaluar_respuesta(pregunta, respuesta)
+                    except Exception as exc:
+                        evaluacion = {
+                            "clasificacion": "no_evaluada",
+                            "score": 0,
+                            "explicacion": f"No se pudo evaluar: {exc}",
+                            "fallos": ["evaluacion_no_disponible"],
+                        }
 
-            clasificacion = evaluacion.get("clasificacion", "incorrecta")
-            score = float(evaluacion.get("score", 0))
+                clasificacion = evaluacion.get("clasificacion", "incorrecta")
+                score = float(evaluacion.get("score", 0))
 
-            registro = {
-                "pregunta": pregunta,
-                "respuesta": respuesta,
-                "stdout_completo": ejecucion["stdout_completo"],
-                "stderr": ejecucion["stderr"],
-                "returncode": ejecucion["returncode"],
-                "cmd": ejecucion["cmd"],
-                "evaluacion": evaluacion,
-            }
-            out.write(json.dumps(registro, ensure_ascii=False) + "\n")
+                registro = {
+                    "modo": modo,
+                    "pregunta": pregunta,
+                    "respuesta": respuesta,
+                    "stdout_completo": ejecucion["stdout_completo"],
+                    "stderr": ejecucion["stderr"],
+                    "returncode": ejecucion["returncode"],
+                    "cmd": ejecucion["cmd"],
+                    "evaluacion": evaluacion,
+                }
+                out.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
-            resultados_qa.append((pregunta, respuesta))
-            total += 1
-            suma_scores += score
-            suma_precision_ponderada += valor_clasificacion(clasificacion)
+                respuestas_por_modo[modo] = respuesta
+                actualizar_metricas(metricas_por_modo[modo], clasificacion, score)
 
-            if clasificacion == "correcta":
-                correctas += 1
-            elif clasificacion == "parcialmente_correcta":
-                parciales += 1
-            elif clasificacion == "no_evaluada":
-                no_evaluadas += 1
-            else:
-                incorrectas += 1
+                if ejecucion["returncode"] != 0:
+                    print(f"     Return code ({modo}): {ejecucion['returncode']}")
+                print(f"     {modo}: {clasificacion} | score {score}")
+                print(f"     {modo} explicación: {evaluacion.get('explicacion', '')}")
 
-            if ejecucion["returncode"] != 0:
-                print(f"Return code: {ejecucion['returncode']}")
-            print("Clasificación:", clasificacion)
-            print("Score:", score)
-            print("Explicación:", evaluacion.get("explicacion", ""))
-
-    precision_binaria = correctas / total if total else 0.0
-    precision_ponderada = suma_precision_ponderada / total if total else 0.0
-    media_score = suma_scores / total if total else 0.0
+            resultados_qa.append(
+                {
+                    "pregunta": pregunta,
+                    "respuestas": respuestas_por_modo,
+                }
+            )
 
     with RESUMEN_FILE.open("w", encoding="utf-8") as f:
-        f.write(f"Total preguntas: {total}\n")
-        f.write(f"Correctas: {correctas}\n")
-        f.write(f"Parcialmente correctas: {parciales}\n")
-        f.write(f"Incorrectas: {incorrectas}\n")
-        f.write(f"No evaluadas: {no_evaluadas}\n")
-        f.write(f"Precisión binaria: {precision_binaria:.2f}\n")
-        f.write(f"Precisión ponderada: {precision_ponderada:.2f}\n")
-        f.write(f"Score medio: {media_score:.2f}\n")
+        if len(modos) == 1:
+            resumen = calcular_resumen(metricas_por_modo[modos[0]])
+            escribir_resumen(f, modos[0], resumen, include_header=False)
+        else:
+            for idx, modo in enumerate(modos):
+                if idx > 0:
+                    f.write("\n")
+                resumen = calcular_resumen(metricas_por_modo[modo])
+                escribir_resumen(f, modo, resumen)
 
     with QA_FILE.open("w", encoding="utf-8") as qa:
-        for i, (pregunta, respuesta) in enumerate(resultados_qa):
+        for i, resultado in enumerate(resultados_qa):
             if i > 0:
                 qa.write("\n")
-            qa.write(f"Pregunta: {pregunta}\n")
-            qa.write(f"Respuesta: {respuesta}\n")
+            qa.write(f"Pregunta: {resultado['pregunta']}\n")
+            respuestas = resultado["respuestas"]
+            if len(modos) == 1:
+                qa.write(f"Respuesta: {respuestas[modos[0]]}\n")
+            else:
+                for modo in modos:
+                    qa.write(f"Respuesta [{modo}]: {respuestas.get(modo, '')}\n")
 
     print("\n==== RESULTADOS ====")
-    print("Total:", total)
-    print("Correctas:", correctas)
-    print("Parcialmente correctas:", parciales)
-    print("Incorrectas:", incorrectas)
-    print("No evaluadas:", no_evaluadas)
-    print("Precisión binaria:", round(precision_binaria, 2))
-    print("Precisión ponderada:", round(precision_ponderada, 2))
-    print("Score medio:", round(media_score, 2))
+    for idx, modo in enumerate(modos):
+        if idx > 0:
+            print("")
+        resumen = calcular_resumen(metricas_por_modo[modo])
+        print(f"[{modo}]")
+        print("Total:", resumen["total"])
+        print("Correctas:", resumen["correctas"])
+        print("Parcialmente correctas:", resumen["parciales"])
+        print("Incorrectas:", resumen["incorrectas"])
+        print("No evaluadas:", resumen["no_evaluadas"])
+        print("Precisión binaria:", round(resumen["precision_binaria"], 2))
+        print("Precisión ponderada:", round(resumen["precision_ponderada"], 2))
+        print("Score medio:", round(resumen["media_score"], 2))
     print(f"\nFichero pregunta/respuesta guardado en: {QA_FILE.name}")
 
 
