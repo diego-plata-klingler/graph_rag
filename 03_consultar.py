@@ -16,6 +16,10 @@ Tiene dos modos de recuperación:
   --modo vector
       Búsqueda semántica por embeddings (vector search en Neo4j).
 
+  --modo rrf
+      Ejecuta cypher + grafo + vector y fusiona sus rankings con Reciprocal
+      Rank Fusion (RRF) antes de generar la respuesta.
+
 Uso:
     python 03_consultar.py
     python 03_consultar.py --query "¿Qué requisitos necesita una SGEIC?"
@@ -61,6 +65,9 @@ MAX_CHUNKS_POR_ARTICULO = 2
 FULLTEXT_CHUNK_CANDIDATES = 30
 FULLTEXT_ARTICULO_CANDIDATES = 12
 RERANK_TOP_ARTICULOS = 6
+RRF_K = 60
+RRF_SCORE_SCALE = 15.0
+RRF_MAX_ARTICULOS_POR_MODO = 8
 TOP_ARTICULOS_PARA_VECINOS = 3
 DELTA_ARTICULOS_VECINOS = 2
 TOP_ARTICULOS_PARA_CHUNKS_VECINOS = 3
@@ -1250,6 +1257,171 @@ def _articulos_sin_cita(respuesta: str, articulos_objetivo: list[str]) -> list[s
     return [n for n in articulos_objetivo if not _contiene_cita_articulo(respuesta, n)]
 
 
+def _numero_normalizado_desde_valor(valor) -> str | None:
+    if valor is None:
+        return None
+    texto = _normalizar_texto(str(valor))
+    match = re.search(r"\b(\d+)(?:\s+(bis|ter|quater))?\b", texto)
+    if not match:
+        return None
+    numero = match.group(1)
+    sufijo = match.group(2)
+    return f"{numero}_{sufijo}" if sufijo else numero
+
+
+def _texto_contexto_desde_row_cypher(row: dict) -> str:
+    partes = []
+    for key, value in row.items():
+        if value is None:
+            continue
+        key_norm = _normalizar_texto(str(key))
+        if any(tag in key_norm for tag in ("fragmento", "texto", "titulo", "nombre")):
+            texto = str(value).strip()
+            if texto:
+                partes.append(texto)
+    return "\n".join(partes).strip()
+
+
+def _extraer_articulo_id_desde_row_cypher(row: dict) -> str | None:
+    for key, value in row.items():
+        if value is None:
+            continue
+        key_norm = _normalizar_texto(str(key))
+        texto = str(value).strip().lower()
+        if "id" in key_norm and texto.startswith("art_"):
+            return texto
+
+    for key, value in row.items():
+        key_norm = _normalizar_texto(str(key))
+        if "numero" in key_norm:
+            numero = _numero_normalizado_desde_valor(value)
+            if numero:
+                return _articulo_id(numero)
+    return None
+
+
+def _articulos_desde_rows_cypher(driver, rows: list[dict], verbose: bool = False) -> list[dict]:
+    if not rows:
+        return []
+
+    ids_ordenados: list[str] = []
+    chunks_por_articulo: dict[str, list[dict]] = {}
+    score_por_articulo: dict[str, float] = {}
+
+    for rank, row in enumerate(rows, start=1):
+        art_id = _extraer_articulo_id_desde_row_cypher(row)
+        if not art_id:
+            continue
+        ids_ordenados.append(art_id)
+        score_base = 1.0 / (RRF_K + rank)
+        score_por_articulo[art_id] = max(score_por_articulo.get(art_id, 0.0), score_base)
+
+        texto_contexto = _texto_contexto_desde_row_cypher(row)
+        if texto_contexto:
+            chunks_por_articulo.setdefault(art_id, []).append({
+                "id": f"{art_id}__cypher_{rank}",
+                "texto": texto_contexto,
+                "orden": rank,
+                "score": score_base,
+            })
+
+    ids_ordenados = _dedupe_preservando_orden(ids_ordenados)
+    if not ids_ordenados:
+        if verbose:
+            print("[cypher] No se pudieron mapear filas Cypher a artículos concretos.")
+        return []
+
+    articulos = _adjuntar_chunks_articulos(driver, _fetch_articulos_by_ids(driver, ids_ordenados))
+    enriquecidos = []
+    for articulo in articulos:
+        art_copy = dict(articulo)
+        art_id = art_copy.get("id")
+        art_copy["chunks_relevantes"] = _merge_chunks(
+            art_copy.get("chunks_relevantes", []),
+            chunks_por_articulo.get(art_id, []),
+        )
+        art_copy["score"] = max(float(art_copy.get("score") or 0.0), score_por_articulo.get(art_id, 0.0))
+        enriquecidos.append(art_copy)
+    return _ordenar_articulos(enriquecidos, ids_prioritarios=ids_ordenados)
+
+
+def _pesos_rrf(query: str) -> dict[str, float]:
+    tipo = _clasificar_pregunta(query)
+    if tipo == "articulo_directo":
+        return {"cypher": 1.4, "grafo": 1.0, "vector": 0.8}
+    if tipo in {"comparativa", "condiciones"}:
+        return {"cypher": 0.7, "grafo": 1.2, "vector": 1.0}
+    if tipo == "definicion":
+        return {"cypher": 0.9, "grafo": 1.1, "vector": 1.0}
+    return {"cypher": 0.6, "grafo": 1.0, "vector": 1.1}
+
+
+def _fusionar_articulos_rrf(
+    query: str,
+    rankings_por_modo: dict[str, list[dict]],
+    verbose: bool = False,
+) -> list[dict]:
+    pesos = _pesos_rrf(query)
+    fused: dict[str, dict] = {}
+
+    for modo, articulos in rankings_por_modo.items():
+        peso = pesos.get(modo, 1.0)
+        for rank, articulo in enumerate((articulos or [])[:RRF_MAX_ARTICULOS_POR_MODO], start=1):
+            art_id = articulo.get("id")
+            if not art_id:
+                continue
+            contrib = peso / (RRF_K + rank)
+            previo = fused.get(art_id)
+            if previo is None:
+                actual = dict(articulo)
+                actual["rrf_score"] = contrib
+                actual["rrf_detalle"] = {modo: contrib}
+                actual["rrf_fuentes"] = [modo]
+                fused[art_id] = actual
+                continue
+
+            merged = _merge_articulos([previo], [articulo])[0]
+            merged["rrf_score"] = float(previo.get("rrf_score") or 0.0) + contrib
+            detalle = dict(previo.get("rrf_detalle") or {})
+            detalle[modo] = detalle.get(modo, 0.0) + contrib
+            merged["rrf_detalle"] = detalle
+            fuentes = list(previo.get("rrf_fuentes") or [])
+            if modo not in fuentes:
+                fuentes.append(modo)
+            merged["rrf_fuentes"] = fuentes
+            fused[art_id] = merged
+
+    articulos_fusionados = []
+    for articulo in fused.values():
+        art_copy = dict(articulo)
+        rrf_score = float(art_copy.get("rrf_score") or 0.0)
+        art_copy["score"] = max(float(art_copy.get("score") or 0.0), rrf_score * RRF_SCORE_SCALE)
+        articulos_fusionados.append(art_copy)
+
+    articulos_fusionados.sort(
+        key=lambda art: (
+            -float(art.get("rrf_score") or 0.0),
+            -float(art.get("score") or 0.0),
+            _numero_base_articulo(art),
+            art.get("id", ""),
+        )
+    )
+
+    if verbose and articulos_fusionados:
+        print("[rrf] Top artículos fusionados:")
+        for idx, articulo in enumerate(articulos_fusionados[:8], start=1):
+            detalle = articulo.get("rrf_detalle") or {}
+            detalle_txt = ", ".join(
+                f"{modo}={score:.4f}" for modo, score in sorted(detalle.items(), key=lambda item: item[0])
+            )
+            print(
+                f"  [{idx}] Art. {articulo.get('numero', '?')} "
+                f"(rrf={float(articulo.get('rrf_score') or 0.0):.4f}; {detalle_txt})"
+            )
+
+    return articulos_fusionados
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Búsqueda y contexto
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1629,19 +1801,13 @@ def _fallback_texto(query: str) -> str:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MODO A: consulta_cypher
-# ──────────────────────────────────────────────────────────────────────────────
-
-def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
-    """Usa GraphCypherQAChain: pregunta -> Cypher -> Neo4j -> respuesta."""
+def _ejecutar_recuperacion_cypher(
+    query: str,
+    llm,
+    verbose: bool = False,
+    trace: bool = False,
+) -> tuple[str, list[dict], str]:
     retrieval_query = expand_query(query)
-    articulos_objetivo = _extraer_numeros_articulo(query)
-    ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
-    articulos_directos = _recuperar_articulos_objetivo(query, expandir=True, verbose=verbose or trace)
-    ids_semilla = _semillas_articulos_query(query)
-
-    llm = get_llm(log_llm=log_llm)
     graph = get_lang_graph()
 
     cypher_prompt = ChatPromptTemplate.from_messages([
@@ -1659,7 +1825,6 @@ def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_
         return_intermediate_steps=True,
     )
 
-    # Si la query contiene siglas conocidas, inyectar expansiones exactas para evitar alucinaciones
     _SIGLAS_LEY = {
         "SCR": "Sociedad de Capital-Riesgo (art. 26)",
         "FCR": "Fondo de Capital-Riesgo (art. 30)",
@@ -1684,13 +1849,34 @@ def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_
         "query": f"Responde en español. Ley 22/2014 (BOE).{nota_siglas}\nPregunta: {retrieval_query}"
     })
 
-    # Extraer steps siempre (se usan tanto para trace como para resintetizar)
     steps = result.get("intermediate_steps", [])
+    cypher_generado = steps[0].get("query", "(no disponible)") if steps else "(no disponible)"
     cypher_rows = steps[1].get("context", []) if len(steps) > 1 else []
+    return retrieval_query, cypher_rows, cypher_generado
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MODO A: consulta_cypher
+# ──────────────────────────────────────────────────────────────────────────────
+
+def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
+    """Usa GraphCypherQAChain: pregunta -> Cypher -> Neo4j -> respuesta."""
+    retrieval_query = expand_query(query)
+    articulos_objetivo = _extraer_numeros_articulo(query)
+    ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
+    articulos_directos = _recuperar_articulos_objetivo(query, expandir=True, verbose=verbose or trace)
+    ids_semilla = _semillas_articulos_query(query)
+
+    llm = get_llm(log_llm=log_llm)
+    retrieval_query, cypher_rows, cypher_generado = _ejecutar_recuperacion_cypher(
+        query,
+        llm=llm,
+        verbose=verbose,
+        trace=trace,
+    )
 
     # -- TRACE: mostrar nodos accedidos en Neo4j
     if trace:
-        cypher_generado = steps[0].get("query", "(no disponible)") if steps else "(no disponible)"
         contexto_neo4j = cypher_rows
         print("\n" + "=" * 60)
         print("TRAZA DE ACCESO AL GRAFO")
@@ -1768,6 +1954,45 @@ def consulta_cypher(query: str, verbose: bool = False, trace: bool = False, log_
         verbose=verbose,
         trace=trace,
     )
+
+
+def _buscar_articulos_cypher(
+    query: str,
+    verbose: bool = False,
+    trace: bool = False,
+    log_llm: bool = False,
+) -> list[dict]:
+    llm = get_llm(log_llm=log_llm)
+    try:
+        _, cypher_rows, cypher_generado = _ejecutar_recuperacion_cypher(
+            query,
+            llm=llm,
+            verbose=verbose,
+            trace=trace,
+        )
+    except Exception as exc:
+        if verbose or trace:
+            print(f"[cypher] No se pudo recuperar contexto para RRF. Detalle: {exc}")
+        return []
+
+    driver = get_driver()
+    try:
+        articulos = _articulos_desde_rows_cypher(driver, cypher_rows, verbose=verbose or trace)
+    finally:
+        driver.close()
+
+    if trace:
+        print("\n" + "=" * 60)
+        print("TRAZA DE ACCESO AL GRAFO (modo: CYPHER -> RRF)")
+        print("=" * 60)
+        print("\nCypher generado:")
+        print(f"   {cypher_generado.strip()}")
+        print(f"\nArtículos recuperados para RRF: {len(articulos)}")
+        for idx, art in enumerate(articulos, 1):
+            print(f"  [{idx}] Art. {art.get('numero', '?')} — {art.get('titulo', '')[:70]}")
+        print("=" * 60 + "\n")
+
+    return articulos[:RRF_MAX_ARTICULOS_POR_MODO]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1889,18 +2114,7 @@ def _has_vector_index(driver) -> bool:
     return False
 
 
-def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
-    """Recuperación semántica con embeddings a nivel Chunk."""
-    if _clasificar_pregunta(query) == "articulo_directo":
-        articulos = _recuperar_articulos_objetivo(query, expandir=False, verbose=verbose or trace)
-        return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
-
-    retrieval_query = expand_query(query)
-    articulos_objetivo = _extraer_numeros_articulo(query)
-    ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
-    ids_semilla = _semillas_articulos_query(query)
-    tipo_pregunta = _clasificar_pregunta(query)
-
+def _get_embeddings_client(verbose: bool = False, trace: bool = False):
     def _get_emb(model_name: str):
         try:
             return OpenAIEmbeddings(model=model_name, openai_api_key=OPENAI_API_KEY)
@@ -1909,35 +2123,6 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
                 print(f"[embed] No se pudo inicializar modelo '{model_name}': {e}")
             return None
 
-    def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-        return dot / (norm_a * norm_b) if norm_a > 0 and norm_b > 0 else 0.0
-
-    def _vector_search_fallback(driver, query_vector, top_k=MAX_CHUNKS_RELEVANTES):
-        """Busca en Neo4j cargando embeddings de chunks y ordenando por similitud en Python."""
-        rows = driver.session().run(
-            """
-            MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
-            WHERE c.embedding IS NOT NULL AND size(c.embedding) > 0
-            RETURN a, c
-            """
-        ).data()
-        candidates = []
-        for r in rows:
-            chunk = r["c"]
-            emb = chunk.get("embedding") or []
-            if not emb:
-                continue
-            score = _cosine_similarity(query_vector, emb)
-            candidates.append((score, r["a"], chunk))
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for score, articulo, chunk in candidates[:top_k]:
-            results.append(_row_to_articulo_con_chunk({"a": articulo, "c": chunk, "score": score}))
-        return results
-
     emb = _get_emb(EMBED_MODEL)
     if emb is None and EMBED_MODEL != "text-embedding-3-small":
         if verbose or trace:
@@ -1945,12 +2130,52 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
         emb = _get_emb("text-embedding-3-small")
     if emb is None:
         raise RuntimeError("No se pudo inicializar ningún modelo de embeddings para vector search.")
+    return emb
 
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    return dot / (norm_a * norm_b) if norm_a > 0 and norm_b > 0 else 0.0
+
+
+def _vector_search_fallback(driver, query_vector, top_k=MAX_CHUNKS_RELEVANTES):
+    """Busca en Neo4j cargando embeddings de chunks y ordenando por similitud en Python."""
+    rows = driver.session().run(
+        """
+        MATCH (a:Articulo)-[:TIENE_CHUNK]->(c:Chunk)
+        WHERE c.embedding IS NOT NULL AND size(c.embedding) > 0
+        RETURN a, c
+        """
+    ).data()
+    candidates = []
+    for r in rows:
+        chunk = r["c"]
+        emb = chunk.get("embedding") or []
+        if not emb:
+            continue
+        score = _cosine_similarity(query_vector, emb)
+        candidates.append((score, r["a"], chunk))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    results = []
+    for score, articulo, chunk in candidates[:top_k]:
+        results.append(_row_to_articulo_con_chunk({"a": articulo, "c": chunk, "score": score}))
+    return results
+
+
+def _buscar_articulos_vector(driver, query: str, verbose: bool = False, trace: bool = False) -> list[dict]:
+    retrieval_query = expand_query(query)
+    articulos_objetivo = _extraer_numeros_articulo(query)
+    ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
+    ids_semilla = _semillas_articulos_query(query)
+    tipo_pregunta = _clasificar_pregunta(query)
+
+    emb = _get_embeddings_client(verbose=verbose, trace=trace)
     if (verbose or trace) and retrieval_query != query:
         print(f"[expansion] Query expandida para vector search: {retrieval_query}")
     vector = emb.embed_query(retrieval_query)
 
-    driver = get_driver()
     resultados: dict[str, dict] = {}
 
     def _guardar_articulo(art: dict | None):
@@ -2010,25 +2235,38 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
             _expandir_subgrafo(driver, ids_expansion, verbose=verbose or trace),
             limit_per_article=1,
         ) if ids_expansion else []
-        articulos = _rerank_articulos(
-            query,
-            _merge_articulos(directos, list(resultados.values()), expandidos),
-            tipo_pregunta=tipo_pregunta,
-            ids_prioritarios=ids_objetivo,
-            ids_semilla=ids_semilla,
-            verbose=verbose or trace,
-        )
-        articulos = _expandir_vecindad_local(
-            driver,
-            query=query,
-            articulos=articulos,
-            tipo_pregunta=tipo_pregunta,
-            ids_prioritarios=ids_objetivo,
-            ids_semilla=ids_semilla,
-            verbose=verbose or trace,
-        )[:MAX_ARTICULOS_CONTEXTO]
 
-    driver.close()
+    articulos = _rerank_articulos(
+        query,
+        _merge_articulos(directos, list(resultados.values()), expandidos),
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=verbose or trace,
+    )
+    articulos = _expandir_vecindad_local(
+        driver,
+        query=query,
+        articulos=articulos,
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=verbose or trace,
+    )[:MAX_ARTICULOS_CONTEXTO]
+    return articulos
+
+
+def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
+    """Recuperación semántica con embeddings a nivel Chunk."""
+    if _clasificar_pregunta(query) == "articulo_directo":
+        articulos = _recuperar_articulos_objetivo(query, expandir=False, verbose=verbose or trace)
+        return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
+
+    driver = get_driver()
+    try:
+        articulos = _buscar_articulos_vector(driver, query, verbose=verbose, trace=trace)
+    finally:
+        driver.close()
 
     if verbose or trace:
         print(f"\n  Total artículos en contexto (vector): {len(articulos)}")
@@ -2049,6 +2287,69 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
     return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
 
 
+def consulta_rrf(query: str, verbose: bool = False, trace: bool = False, log_llm: bool = False) -> str:
+    """Recuperación híbrida: fusiona cypher + grafo + vector con Reciprocal Rank Fusion."""
+    tipo_pregunta = _clasificar_pregunta(query)
+    if tipo_pregunta == "articulo_directo":
+        articulos = _recuperar_articulos_objetivo(query, expandir=False, verbose=verbose or trace)
+        return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
+
+    driver = get_driver()
+    try:
+        articulos_grafo = buscar_articulos(driver, query, verbose=verbose or trace)
+        articulos_vector = _buscar_articulos_vector(driver, query, verbose=verbose, trace=trace)
+    finally:
+        driver.close()
+
+    articulos_cypher = _buscar_articulos_cypher(query, verbose=verbose, trace=trace, log_llm=log_llm)
+
+    rankings_por_modo = {
+        "cypher": articulos_cypher,
+        "grafo": articulos_grafo,
+        "vector": articulos_vector,
+    }
+    articulos = _fusionar_articulos_rrf(query, rankings_por_modo, verbose=verbose or trace)
+
+    articulos_objetivo = _extraer_numeros_articulo(query)
+    ids_objetivo = [_articulo_id(n) for n in articulos_objetivo]
+    ids_semilla = _semillas_articulos_query(query)
+    articulos = _rerank_articulos(
+        query,
+        articulos,
+        tipo_pregunta=tipo_pregunta,
+        ids_prioritarios=ids_objetivo,
+        ids_semilla=ids_semilla,
+        verbose=verbose or trace,
+    )[:MAX_ARTICULOS_CONTEXTO]
+
+    if verbose or trace:
+        print(f"\n  Total artículos en contexto (rrf): {len(articulos)}")
+        for a in articulos:
+            fuentes = ",".join(a.get("rrf_fuentes", []))
+            print(
+                f"    - Art. {a.get('numero', '?')}: {a.get('titulo', '')[:60]} "
+                f"(rrf={float(a.get('rrf_score') or 0.0):.4f}; fuentes={fuentes})"
+            )
+
+    if trace:
+        print("\n" + "=" * 60)
+        print("TRAZA DE ACCESO AL GRAFO (modo: RRF)")
+        print("=" * 60)
+        for i, a in enumerate(articulos, 1):
+            detalle = a.get("rrf_detalle") or {}
+            detalle_txt = ", ".join(
+                f"{modo}={score:.4f}" for modo, score in sorted(detalle.items(), key=lambda item: item[0])
+            )
+            print(
+                f"\n  [{i}] Art. {a.get('numero', '?')} — {a.get('titulo', '')[:70]} "
+                f"(rrf={float(a.get('rrf_score') or 0.0):.4f}; {detalle_txt})"
+            )
+            print(f"       id: {a.get('id')}")
+        print("=" * 60 + "\n")
+
+    return generar_respuesta_grafo(query, articulos, log_llm=log_llm)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main interactivo
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2056,8 +2357,8 @@ def consulta_vector(query: str, verbose: bool = False, trace: bool = False, log_
 def main():
     parser = argparse.ArgumentParser(description="Graph RAG sobre la Ley 22/2014 (BOE)")
     parser.add_argument("--query", "-q", type=str, help="Pregunta directa")
-    parser.add_argument("--modo", choices=["cypher", "grafo", "vector"], default="cypher",
-                        help="Modo de recuperación (defecto: cypher). vector = búsqueda semántica por embeddings")
+    parser.add_argument("--modo", choices=["cypher", "grafo", "vector", "rrf"], default="cypher",
+                        help="Modo de recuperación (defecto: cypher). rrf = fusiona cypher+grafo+vector")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Mostrar Cypher generado / nodos recuperados")
     parser.add_argument("--trace", "-t", action="store_true",
@@ -2076,6 +2377,8 @@ def main():
             respuesta = consulta_cypher(query, verbose=args.verbose, trace=args.trace, log_llm=args.log_llm)
         elif args.modo == "vector":
             respuesta = consulta_vector(query, verbose=args.verbose, trace=args.trace, log_llm=args.log_llm)
+        elif args.modo == "rrf":
+            respuesta = consulta_rrf(query, verbose=args.verbose, trace=args.trace, log_llm=args.log_llm)
         else:
             respuesta = consulta_grafo(query, verbose=args.verbose, trace=args.trace, log_llm=args.log_llm)
         print(f"\nRESPUESTA:\n{respuesta}\n")

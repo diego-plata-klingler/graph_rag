@@ -17,7 +17,7 @@ RESULTADOS_FILE = BASE_DIR / "evaluaciones.jsonl"
 RESUMEN_FILE = BASE_DIR / "resumen.txt"
 QA_FILE = BASE_DIR / "preguntas_respuestas.txt"
 
-MODOS_DISPONIBLES = ("cypher", "grafo", "vector")
+MODOS_DISPONIBLES = ("cypher", "grafo", "vector", "rrf")
 DEFAULT_MODO = "grafo"
 DEFAULT_MAX_PREGUNTAS = 30
 

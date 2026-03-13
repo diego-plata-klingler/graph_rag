@@ -1,30 +1,15 @@
-¿Qué regula la Ley 22/2014 según su objeto?
-¿Qué se entiende por inversión colectiva de tipo cerrado y qué condiciones deben cumplir las desinversiones?
-¿Qué son las entidades de capital-riesgo y cuál es su actividad principal?
-¿Qué diferencia existe entre una sociedad de capital riesgo y un fondo de capital riesgo?
-¿Qué formas jurídicas pueden adoptar las entidades de capital-riesgo?
-¿Qué significa EICCP dentro de la Ley 22/2014?
-¿Qué entidades quedan expresamente excluidas del ámbito de aplicación de la ley?
-¿Cuál es la relación entre el objeto principal de las entidades de capital-riesgo y el porcentaje mínimo de inversión que deben mantener?
-¿Qué actividades complementarias pueden realizar las entidades de capital-riesgo además de su actividad principal?
-¿Qué tipo de financiación pueden conceder las entidades de capital-riesgo a las empresas participadas?
-¿Qué instrumentos financieros pueden computar dentro del coeficiente obligatorio de inversión de una ECR?
-¿Qué porcentaje mínimo del activo deben mantener las ECR en inversiones que cumplan su coeficiente obligatorio?
-¿Qué ocurre si una ECR incumple temporalmente el coeficiente obligatorio de inversión?
-¿Cómo se combinan las normas sobre diversificación de inversiones con el coeficiente obligatorio de inversión en las ECR?
-¿Qué límites existen para invertir en una misma empresa y en empresas del mismo grupo?
-¿En qué se diferencian las limitaciones de inversión de las ECR respecto de las ECR-Pyme?
-¿Qué caracteriza a una ECR-Pyme en comparación con una ECR ordinaria?
-¿Qué porcentaje del activo deben invertir las ECR-Pyme en empresas objetivo y qué requisitos deben cumplir esas empresas?
-¿Qué condiciones deben cumplir las empresas en las que invierten las ECR-Pyme?
-¿Pueden las ECR invertir en empresas cotizadas y en qué condiciones?
-¿Cómo se relacionan las reglas sobre empresas cotizadas con el coeficiente obligatorio de inversión?
-¿Qué funciones debe realizar una SGEIC en relación con la gestión de las entidades que administra?
-¿Qué relación existe entre la gestión de riesgos de una SGEIC y las obligaciones de información a los inversores?
-¿Qué tipo de entidades puede gestionar una SGEIC?
-¿Puede una SCR actuar como su propia sociedad gestora y bajo qué condiciones?
-¿Qué información deben proporcionar las SGEIC a los inversores antes de que realicen una inversión?
-¿Qué información deben comunicar periódicamente las SGEIC a los inversores?
-¿Qué papel desempeña la Comisión Nacional del Mercado de Valores en la supervisión de estas entidades?
-¿Qué consecuencias puede tener el incumplimiento de las obligaciones establecidas en la ley?
-¿Qué diferencias existen entre las entidades de inversión colectiva de tipo cerrado y las entidades de capital-riesgo en cuanto a su objeto y forma de inversión?
+¿Cómo se relaciona el coeficiente obligatorio de inversión definido en el artículo 13 con el concepto de activo computable descrito en el artículo 18?
+¿En qué situaciones puede una ECR incumplir temporalmente el coeficiente obligatorio de inversión y qué relación tiene ese incumplimiento con el porcentaje establecido en el artículo 13?
+¿Qué tipos de activos pueden computar para el coeficiente obligatorio de inversión y qué límites específicos se aplican a los préstamos participativos según el artículo 13?
+¿Qué entidades quedan excluidas del concepto de EICC según el artículo 4 y cómo se relaciona esta exclusión con las entidades de capital-riesgo definidas en la misma ley?
+¿Qué obligaciones de información deben proporcionar las SGEIC a los inversores antes de la inversión y qué relación tienen con el uso de apalancamiento por parte de ECR o EICC?
+¿Qué información periódica deben comunicar las SGEIC a los inversores cuando una ECR o EICC utiliza apalancamiento y cómo se vincula con el Reglamento Delegado (UE) 231/2013?
+¿Qué requisitos deben cumplirse para la constitución de una ECR o EICC y qué relación tienen estos requisitos con su inscripción en el registro de la CNMV?
+¿En qué condiciones pueden comercializarse participaciones de ECR a inversores no profesionales y qué límites de inversión establece la ley para estos casos?
+¿Qué relación existe entre las reglas de gestión de liquidez de las ECR o EICC y los riesgos derivados del uso de apalancamiento?
+¿Cómo se combinan los límites de inversión en determinados activos con las reglas de política de inversión que deben figurar en los estatutos o reglamentos de las ECR?
+Según el artículo 13.3, las ECR deben mantener un porcentaje mínimo de su activo computable en determinados activos. ¿Cómo afecta a ese cálculo la definición de activo computable establecida en el artículo 18 y qué ajustes pueden introducir el Ministro de Economía o la CNMV?
+El artículo 17 permite incumplir temporalmente el coeficiente obligatorio de inversión. ¿Durante qué periodos puede producirse ese incumplimiento y a qué porcentaje concreto establecido en el artículo 13 se refiere esa excepción?
+¿Qué relación existe entre las obligaciones de información previa a los inversores establecidas en el artículo 68 y la información periódica sobre apalancamiento que debe comunicarse según el artículo 69?
+El artículo 4 define las EICC y sus formas jurídicas. ¿Qué entidades quedan explícitamente excluidas de esa definición y a qué otros artículos de la ley se hace referencia para establecer esa exclusión?
+En relación con las titulizaciones mencionadas en el artículo 18, ¿qué porcentaje debe retener el originador y qué normativa europea se cita como referencia para los límites de titulización y apalancamiento?
